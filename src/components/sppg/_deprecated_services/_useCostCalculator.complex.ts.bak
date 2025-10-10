@@ -1,0 +1,423 @@
+// Cost Calculator Hooks - Component-Level Implementation
+// Consolidating cost calculation logic from domain services
+// src/components/sppg/menu/hooks/useCostCalculator.ts
+
+import { useMemo } from 'react'
+import { useQuery } from '@tanstack/react-query'
+import { useSession } from 'next-auth/react'
+import db from '@/lib/db'
+
+export interface IngredientCost {
+  inventoryItemId: string
+  itemName: string
+  quantity: number
+  unit: string
+  unitCost: number
+  totalCost: number
+  availability: 'AVAILABLE' | 'LOW_STOCK' | 'OUT_OF_STOCK'
+}
+
+export interface MenuCostCalculation {
+  totalIngredientCost: number
+  laborCost: number
+  overheadCost: number
+  packagingCost: number
+  totalCostPerServing: number
+  suggestedSellingPrice: number
+  profitMargin: number
+  costBreakdown: {
+    ingredients: number
+    labor: number
+    overhead: number
+    packaging: number
+  }
+  ingredients: IngredientCost[]
+}
+
+export interface CostCalculatorConfig {
+  laborCostPerHour: number
+  overheadPercentage: number
+  packagingCostPerServing: number
+  profitMarginPercentage: number
+  preparationTimeMinutes: number
+}
+
+// Default configuration for Indonesian SPPG context
+const DEFAULT_CONFIG: CostCalculatorConfig = {
+  laborCostPerHour: 25000,        // IDR 25,000 per hour
+  overheadPercentage: 0.15,       // 15% overhead
+  packagingCostPerServing: 500,   // IDR 500 per serving
+  profitMarginPercentage: 0.20,   // 20% profit margin
+  preparationTimeMinutes: 30      // 30 minutes preparation time
+}
+
+export function useCostCalculator(config: Partial<CostCalculatorConfig> = {}) {
+  const finalConfig = useMemo(() => ({
+    ...DEFAULT_CONFIG,
+    ...config
+  }), [config])
+
+  return useMemo(() => ({
+    calculateMenuCost: async (
+      ingredients: Array<{
+        inventoryItemId: string
+        quantity: number
+      }>,
+      servings: number,
+      sppgId: string
+    ): Promise<MenuCostCalculation> => {
+      return calculateMenuCost(ingredients, servings, sppgId, finalConfig)
+    },
+
+    calculateIngredientCost: (
+      quantity: number,
+      unitCost: number,
+      servings: number
+    ): number => {
+      return (quantity * unitCost) / servings
+    },
+
+    calculateLaborCost: (
+      preparationTimeMinutes: number,
+      laborCostPerHour: number,
+      servings: number
+    ): number => {
+      const laborHours = preparationTimeMinutes / 60
+      return (laborHours * laborCostPerHour) / servings
+    },
+
+    calculateOverheadCost: (
+      ingredientCost: number,
+      overheadPercentage: number
+    ): number => {
+      return ingredientCost * overheadPercentage
+    },
+
+    calculateSuggestedPrice: (
+      totalCost: number,
+      profitMarginPercentage: number
+    ): number => {
+      return totalCost * (1 + profitMarginPercentage)
+    },
+
+    validateCostInputs: (
+      ingredients: Array<{ inventoryItemId: string; quantity: number }>,
+      servings: number
+    ): { isValid: boolean; errors: string[] } => {
+      const errors: string[] = []
+
+      if (!ingredients || ingredients.length === 0) {
+        errors.push('Minimal satu bahan harus ditambahkan')
+      }
+
+      if (servings <= 0) {
+        errors.push('Jumlah porsi harus lebih dari 0')
+      }
+
+      ingredients.forEach((ingredient, index) => {
+        if (!ingredient.inventoryItemId) {
+          errors.push(`Bahan ke-${index + 1}: Pilih item inventory`)
+        }
+        if (ingredient.quantity <= 0) {
+          errors.push(`Bahan ke-${index + 1}: Kuantitas harus lebih dari 0`)
+        }
+      })
+
+      return {
+        isValid: errors.length === 0,
+        errors
+      }
+    }
+  }), [finalConfig])
+}
+
+// ================================ COST CALCULATION FUNCTION ================================
+
+async function calculateMenuCost(
+  ingredients: Array<{
+    inventoryItemId: string
+    quantity: number
+  }>,
+  servings: number,
+  sppgId: string,
+  config: CostCalculatorConfig
+): Promise<MenuCostCalculation> {
+  // 1. Fetch inventory items with current costs
+  const inventoryItems = await db.inventoryItem.findMany({
+    where: {
+      sppgId,
+      id: {
+        in: ingredients.map(ing => ing.inventoryItemId)
+      }
+    },
+    select: {
+      id: true,
+      itemName: true,
+      unit: true,
+      lastPrice: true,
+      averagePrice: true,
+      currentStock: true,
+      minStock: true
+    }
+  })
+
+  // 2. Calculate ingredient costs
+  const ingredientCosts: IngredientCost[] = ingredients.map(ingredient => {
+    const inventoryItem = inventoryItems.find(item => item.id === ingredient.inventoryItemId)
+    
+    if (!inventoryItem) {
+      throw new Error(`Inventory item not found: ${ingredient.inventoryItemId}`)
+    }
+
+    // Determine availability
+    let availability: 'AVAILABLE' | 'LOW_STOCK' | 'OUT_OF_STOCK' = 'AVAILABLE'
+    if (inventoryItem.currentStock <= 0) {
+      availability = 'OUT_OF_STOCK'
+    } else if (inventoryItem.currentStock <= inventoryItem.minStockLevel) {
+      availability = 'LOW_STOCK'
+    }
+
+    const totalCost = ingredient.quantity * inventoryItem.unitCost
+
+    return {
+      inventoryItemId: ingredient.inventoryItemId,
+      itemName: inventoryItem.itemName,
+      quantity: ingredient.quantity,
+      unit: inventoryItem.unit,
+      unitCost: inventoryItem.unitCost,
+      totalCost,
+      availability
+    }
+  })
+
+  // 3. Calculate cost components
+  const totalIngredientCost = ingredientCosts.reduce((sum, ing) => sum + ing.totalCost, 0)
+  const ingredientCostPerServing = totalIngredientCost / servings
+
+  const laborCost = calculateLaborCostPerServing(
+    config.preparationTimeMinutes,
+    config.laborCostPerHour,
+    servings
+  )
+
+  const overheadCost = ingredientCostPerServing * config.overheadPercentage
+  const packagingCost = config.packagingCostPerServing
+
+  const totalCostPerServing = ingredientCostPerServing + laborCost + overheadCost + packagingCost
+  const suggestedSellingPrice = totalCostPerServing * (1 + config.profitMarginPercentage)
+  const profitMargin = suggestedSellingPrice - totalCostPerServing
+
+  return {
+    totalIngredientCost,
+    laborCost,
+    overheadCost,
+    packagingCost,
+    totalCostPerServing,
+    suggestedSellingPrice,
+    profitMargin,
+    costBreakdown: {
+      ingredients: (ingredientCostPerServing / totalCostPerServing) * 100,
+      labor: (laborCost / totalCostPerServing) * 100,
+      overhead: (overheadCost / totalCostPerServing) * 100,
+      packaging: (packagingCost / totalCostPerServing) * 100
+    },
+    ingredients: ingredientCosts
+  }
+}
+
+function calculateLaborCostPerServing(
+  preparationTimeMinutes: number,
+  laborCostPerHour: number,
+  servings: number
+): number {
+  const laborHours = preparationTimeMinutes / 60
+  return (laborHours * laborCostPerHour) / servings
+}
+
+// ================================ REACT QUERY HOOKS ================================
+
+export function useMenuCostCalculation(
+  ingredients: Array<{ inventoryItemId: string; quantity: number }>,
+  servings: number,
+  config?: Partial<CostCalculatorConfig>
+) {
+  const { data: session } = useSession()
+  const calculator = useCostCalculator(config)
+
+  return useQuery({
+    queryKey: ['menu-cost', session?.user?.sppgId, ingredients, servings, config],
+    queryFn: () => {
+      if (!session?.user?.sppgId) throw new Error('No SPPG ID')
+      return calculator.calculateMenuCost(ingredients, servings, session.user.sppgId)
+    },
+    enabled: !!session?.user?.sppgId && ingredients.length > 0 && servings > 0,
+    staleTime: 2 * 60 * 1000, // 2 minutes - costs can change frequently
+  })
+}
+
+export function useIngredientCosts(
+  ingredientIds: string[]
+) {
+  const { data: session } = useSession()
+
+  return useQuery({
+    queryKey: ['ingredient-costs', session?.user?.sppgId, ingredientIds],
+    queryFn: () => {
+      if (!session?.user?.sppgId) throw new Error('No SPPG ID')
+      return getIngredientCosts(ingredientIds, session.user.sppgId)
+    },
+    enabled: !!session?.user?.sppgId && ingredientIds.length > 0,
+    staleTime: 5 * 60 * 1000, // 5 minutes
+  })
+}
+
+async function getIngredientCosts(ingredientIds: string[], sppgId: string) {
+  return db.inventoryItem.findMany({
+    where: {
+      sppgId,
+      id: {
+        in: ingredientIds
+      }
+    },
+    select: {
+      id: true,
+      itemName: true,
+      unit: true,
+      unitCost: true,
+      currentStock: true,
+      minStockLevel: true,
+      category: true,
+      supplier: true
+    }
+  })
+}
+
+// ================================ UTILITY HOOKS ================================
+
+export function useCostValidation(
+  ingredients: Array<{ inventoryItemId: string; quantity: number }>,
+  servings: number
+) {
+  const calculator = useCostCalculator()
+
+  return useMemo(() => {
+    return calculator.validateCostInputs(ingredients, servings)
+  }, [ingredients, servings, calculator])
+}
+
+export function useCostComparison(
+  targetCost: number,
+  actualCost: number
+) {
+  return useMemo(() => {
+    const difference = actualCost - targetCost
+    const percentageDifference = targetCost > 0 ? (difference / targetCost) * 100 : 0
+
+    let status: 'UNDER_BUDGET' | 'ON_BUDGET' | 'OVER_BUDGET' = 'ON_BUDGET'
+    
+    if (Math.abs(percentageDifference) <= 5) {
+      status = 'ON_BUDGET'
+    } else if (difference < 0) {
+      status = 'UNDER_BUDGET'  
+    } else {
+      status = 'OVER_BUDGET'
+    }
+
+    return {
+      difference,
+      percentageDifference: Math.round(percentageDifference * 100) / 100,
+      status,
+      message: getCostComparisonMessage(status, percentageDifference)
+    }
+  }, [targetCost, actualCost])
+}
+
+function getCostComparisonMessage(
+  status: 'UNDER_BUDGET' | 'ON_BUDGET' | 'OVER_BUDGET',
+  percentage: number
+): string {
+  switch (status) {
+    case 'UNDER_BUDGET':
+      return `Biaya ${Math.abs(percentage).toFixed(1)}% di bawah target`
+    case 'ON_BUDGET':
+      return 'Biaya sesuai target'
+    case 'OVER_BUDGET':
+      return `Biaya ${percentage.toFixed(1)}% melebihi target`
+  }
+}
+
+// ================================ COST OPTIMIZATION HOOK ================================
+
+export function useCostOptimization() {
+  return useMemo(() => ({
+    suggestCostReduction: (costCalculation: MenuCostCalculation): string[] => {
+      const suggestions: string[] = []
+
+      // Check if ingredients cost is too high (>60% of total)
+      if (costCalculation.costBreakdown.ingredients > 60) {
+        suggestions.push('Pertimbangkan bahan alternatif yang lebih ekonomis')
+        suggestions.push('Evaluasi kuantitas bahan yang digunakan')
+      }
+
+      // Check if labor cost is too high (>25% of total)
+      if (costCalculation.costBreakdown.labor > 25) {
+        suggestions.push('Optimalkan proses persiapan untuk mengurangi waktu')
+        suggestions.push('Pertimbangkan batch cooking untuk efisiensi')
+      }
+
+      // Check if overhead is too high (>20% of total)
+      if (costCalculation.costBreakdown.overhead > 20) {
+        suggestions.push('Review biaya overhead dan cari cara untuk mengoptimalkan')
+      }
+
+      // Check for out of stock ingredients
+      const outOfStock = costCalculation.ingredients.filter(ing => ing.availability === 'OUT_OF_STOCK')
+      if (outOfStock.length > 0) {
+        suggestions.push(`Stok habis: ${outOfStock.map(ing => ing.itemName).join(', ')}`)
+      }
+
+      // Check for low stock ingredients
+      const lowStock = costCalculation.ingredients.filter(ing => ing.availability === 'LOW_STOCK')
+      if (lowStock.length > 0) {
+        suggestions.push(`Stok menipis: ${lowStock.map(ing => ing.itemName).join(', ')}`)
+      }
+
+      return suggestions
+    },
+
+    findCostEffectiveAlternatives: async (
+      ingredientId: string,
+      sppgId: string
+    ): Promise<Array<{
+      id: string
+      itemName: string
+      unitCost: number
+      savings: number
+    }>> => {
+      // This would query for similar ingredients with lower costs
+      // Simplified implementation - would need more sophisticated matching
+      const alternatives = await db.inventoryItem.findMany({
+        where: {
+          sppgId,
+          id: { not: ingredientId },
+          // category: same category as original ingredient
+        },
+        select: {
+          id: true,
+          itemName: true,
+          unitCost: true
+        },
+        orderBy: {
+          unitCost: 'asc'
+        },
+        take: 5
+      })
+
+      // Calculate potential savings (simplified)
+      return alternatives.map(alt => ({
+        ...alt,
+        savings: 0 // Would calculate based on original ingredient cost
+      }))
+    }
+  }), [])
+}

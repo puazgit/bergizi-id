@@ -1,0 +1,437 @@
+// Inventory Store - Pattern 2 Implementation
+// Self-contained Inventory domain state management
+// src/components/sppg/inventory/stores/useInventoryStore.ts
+
+import { create } from 'zustand'
+import { devtools, persist, createJSONStorage } from 'zustand/middleware'
+import { immer } from 'zustand/middleware/immer'
+import type { 
+  InventoryItemWithDetails, 
+  InventoryFilters, 
+  CreateInventoryItemInput 
+} from '../types'
+
+// Inventory State Interface
+export interface InventoryState {
+  // Core inventory data
+  items: InventoryItemWithDetails[]
+  selectedItem: InventoryItemWithDetails | null
+  
+  // UI state
+  loading: boolean
+  error: string | null
+  syncStatus: 'idle' | 'syncing' | 'synced' | 'error'
+  
+  // Advanced filtering & search
+  filters: InventoryFilters & {
+    globalSearch: string
+    categoryFilter: string[]
+    statusFilter: string[]
+    supplierFilter: string[]
+    stockLevelFilter: 'low' | 'normal' | 'high' | 'all'
+    expiryDateRange: {
+      startDate?: Date
+      endDate?: Date
+    }
+  }
+  
+  // Pagination
+  pagination: {
+    page: number
+    limit: number
+    total: number
+    totalPages: number
+    hasNext: boolean
+    hasPrev: boolean
+  }
+  
+  // Selection & bulk operations
+  selection: {
+    selectedIds: string[]
+    isAllSelected: boolean
+    bulkOperation: 'update_stock' | 'mark_expired' | 'delete' | 'reorder' | null
+  }
+  
+  // Offline capabilities
+  offline: {
+    isOnline: boolean
+    queue: Array<{
+      id: string
+      action: 'create' | 'update' | 'delete'
+      data: unknown
+      timestamp: Date
+    }>
+    lastSync: Date | null
+  }
+  
+  // Form state
+  form: {
+    isOpen: boolean
+    mode: 'create' | 'edit'
+    data: Partial<CreateInventoryItemInput>
+    isDirty: boolean
+    errors: Record<string, string>
+  }
+  
+  // User preferences
+  preferences: {
+    defaultView: 'table' | 'card' | 'grid'
+    itemsPerPage: 10 | 25 | 50 | 100
+    defaultSort: keyof InventoryItemWithDetails
+    autoRefresh: boolean
+    showLowStockAlert: boolean
+    showExpiryAlert: boolean
+  }
+  
+  // Stock alerts
+  alerts: {
+    lowStock: InventoryItemWithDetails[]
+    expiringSoon: InventoryItemWithDetails[]
+    expired: InventoryItemWithDetails[]
+  }
+}
+
+// Inventory Actions Interface
+export interface InventoryActions {
+  // Basic CRUD actions
+  setItems: (items: InventoryItemWithDetails[]) => void
+  addItem: (item: InventoryItemWithDetails) => void
+  updateItem: (id: string, updates: Partial<InventoryItemWithDetails>) => void
+  removeItem: (id: string) => void
+  setSelectedItem: (item: InventoryItemWithDetails | null) => void
+  
+  // UI state actions
+  setLoading: (loading: boolean) => void
+  setError: (error: string | null) => void
+  setSyncStatus: (status: InventoryState['syncStatus']) => void
+  
+  // Filter actions
+  setFilters: (filters: Partial<InventoryState['filters']>) => void
+  setGlobalSearch: (search: string) => void
+  setCategoryFilter: (categories: string[]) => void
+  setStatusFilter: (statuses: string[]) => void
+  setSupplierFilter: (suppliers: string[]) => void
+  setStockLevelFilter: (level: InventoryState['filters']['stockLevelFilter']) => void
+  setExpiryDateRange: (range: Partial<InventoryState['filters']['expiryDateRange']>) => void
+  clearFilters: () => void
+  
+  // Pagination actions
+  setPagination: (pagination: Partial<InventoryState['pagination']>) => void
+  setPage: (page: number) => void
+  setLimit: (limit: number) => void
+  nextPage: () => void
+  prevPage: () => void
+  
+  // Selection actions
+  toggleSelectItem: (id: string) => void
+  selectAll: () => void
+  clearSelection: () => void
+  setBulkOperation: (operation: InventoryState['selection']['bulkOperation']) => void
+  
+  // Stock management actions
+  updateStock: (id: string, quantity: number, reason: string) => void
+  addStock: (id: string, quantity: number, reason: string) => void
+  reduceStock: (id: string, quantity: number, reason: string) => void
+  setMinimumStock: (id: string, minimum: number) => void
+  markAsExpired: (id: string) => void
+  
+  // Bulk operations
+  bulkUpdateStock: (updates: Array<{id: string, quantity: number, reason: string}>) => void
+  bulkMarkExpired: (ids: string[]) => void
+  bulkReorder: (ids: string[]) => void
+  
+  // Alert management
+  updateAlerts: () => void
+  dismissAlert: (type: 'lowStock' | 'expiringSoon' | 'expired', itemId: string) => void
+  
+  // Analytics actions
+  calculateTotalValue: (categoryId?: string) => number
+  getItemsByCategory: (categoryId: string) => InventoryItemWithDetails[]
+  getItemsBySupplier: (supplierId: string) => InventoryItemWithDetails[]
+  getLowStockItems: (threshold?: number) => InventoryItemWithDetails[]
+  getExpiringItems: (days?: number) => InventoryItemWithDetails[]
+  
+  // Preferences actions
+  setPreferences: (preferences: Partial<InventoryState['preferences']>) => void
+  setDefaultView: (view: InventoryState['preferences']['defaultView']) => void
+  setItemsPerPage: (items: InventoryState['preferences']['itemsPerPage']) => void
+  
+  // Sorting actions
+  setSorting: (field: string, direction: 'asc' | 'desc') => void
+  
+  // Reset actions
+  reset: () => void
+  resetToDefaults: () => void
+  
+  // Additional actions stubs
+  setOnlineStatus: (isOnline: boolean) => void
+  addToOfflineQueue: (action: 'create' | 'update' | 'delete', data: unknown) => void
+  processOfflineQueue: () => void
+  clearOfflineQueue: () => void
+  openForm: (mode: 'create' | 'edit', data?: Partial<CreateInventoryItemInput>) => void
+  closeForm: () => void
+  updateFormField: (field: string, value: unknown) => void
+  setFormErrors: (errors: Record<string, string>) => void
+  clearFormErrors: () => void
+  resetForm: () => void
+}
+
+// Combined Inventory Store Type
+export type InventoryStore = InventoryState & InventoryActions
+
+const initialInventoryState: InventoryState = {
+  items: [],
+  selectedItem: null,
+  loading: false,
+  error: null,
+  syncStatus: 'idle',
+  
+  filters: {
+    page: 1,
+    limit: 25,
+    sortBy: 'itemName',
+    sortOrder: 'asc',
+    globalSearch: '',
+    categoryFilter: [],
+    statusFilter: [],
+    supplierFilter: [],
+    stockLevelFilter: 'all',
+    expiryDateRange: {},
+  },
+  
+  pagination: {
+    page: 1,
+    limit: 25,
+    total: 0,
+    totalPages: 0,
+    hasNext: false,
+    hasPrev: false,
+  },
+  
+  selection: {
+    selectedIds: [],
+    isAllSelected: false,
+    bulkOperation: null,
+  },
+  
+  offline: {
+    isOnline: true,
+    queue: [],
+    lastSync: null,
+  },
+  
+  form: {
+    isOpen: false,
+    mode: 'create',
+    data: {},
+    isDirty: false,
+    errors: {},
+  },
+  
+  preferences: {
+    defaultView: 'table',
+    itemsPerPage: 25,
+    defaultSort: 'itemName',
+    autoRefresh: false,
+    showLowStockAlert: true,
+    showExpiryAlert: true,
+  },
+  
+  alerts: {
+    lowStock: [],
+    expiringSoon: [],
+    expired: [],
+  },
+}
+
+// Inventory Store with advanced middleware  
+export const useInventoryStore = create(
+  devtools(
+    persist(
+      (set, get) => ({
+        ...initialInventoryState,
+        
+        // Basic CRUD actions
+        setItems: (items) =>
+          set((state) => {
+            state.items = items
+          }),
+
+        addItem: (item) =>
+          set((state) => {
+            state.items.unshift(item)
+            state.pagination.total += 1
+          }),
+
+        updateItem: (id, updates) =>
+          set((state) => {
+            const index = state.items.findIndex(i => i.id === id)
+            if (index !== -1) {
+              state.items[index] = { ...state.items[index], ...updates }
+            }
+          }),
+
+        removeItem: (id) =>
+          set((state) => {
+            state.items = state.items.filter(i => i.id !== id)
+            state.pagination.total -= 1
+            state.selection.selectedIds = state.selection.selectedIds.filter(selectedId => selectedId !== id)
+          }),
+
+        // Stock management actions
+        updateStock: (id, quantity, reason) =>
+          set((state) => {
+            const item = state.items.find(i => i.id === id)
+            if (item) {
+              item.currentStock = quantity
+              item.lastUpdated = new Date()
+              // Add stock movement record logic here
+            }
+          }),
+
+        addStock: (id, quantity, reason) =>
+          set((state) => {
+            const item = state.items.find(i => i.id === id)
+            if (item) {
+              item.currentStock = (item.currentStock || 0) + quantity
+              item.lastUpdated = new Date()
+              // Add stock movement record logic here
+            }
+          }),
+
+        reduceStock: (id, quantity, reason) =>
+          set((state) => {
+            const item = state.items.find(i => i.id === id)
+            if (item) {
+              item.currentStock = Math.max(0, (item.currentStock || 0) - quantity)
+              item.lastUpdated = new Date()
+              // Add stock movement record logic here
+            }
+          }),
+
+        markAsExpired: (id) =>
+          set((state) => {
+            const item = state.items.find(i => i.id === id)
+            if (item) {
+              item.status = 'EXPIRED'
+              item.lastUpdated = new Date()
+            }
+          }),
+
+        // Alert management
+        updateAlerts: () =>
+          set((state) => {
+            const now = new Date()
+            const alertThreshold = 30 // days for expiry alert
+            
+            state.alerts.lowStock = state.items.filter(item => 
+              item.currentStock <= (item.minimumStock || 0)
+            )
+            
+            state.alerts.expiringSoon = state.items.filter(item => {
+              if (!item.expiryDate) return false
+              const daysUntilExpiry = Math.ceil(
+                (new Date(item.expiryDate).getTime() - now.getTime()) / (1000 * 60 * 60 * 24)
+              )
+              return daysUntilExpiry > 0 && daysUntilExpiry <= alertThreshold
+            })
+            
+            state.alerts.expired = state.items.filter(item => {
+              if (!item.expiryDate) return false
+              return new Date(item.expiryDate) < now
+            })
+          }),
+
+        // Analytics actions
+        calculateTotalValue: (categoryId) => {
+          const state = useInventoryStore.getState()
+          const targetItems = categoryId
+            ? state.items.filter(item => item.categoryId === categoryId)
+            : state.items
+          
+          return targetItems.reduce((total, item) => {
+            return total + ((item.currentStock || 0) * (item.unitPrice || 0))
+          }, 0)
+        },
+
+        getLowStockItems: (threshold = 10) => {
+          const state = useInventoryStore.getState()
+          return state.items.filter(item => (item.currentStock || 0) <= threshold)
+        },
+
+        // Reset actions
+        reset: () => set(initialInventoryState),
+
+        resetToDefaults: () =>
+          set((state) => {
+            state.filters = initialInventoryState.filters
+            state.pagination = initialInventoryState.pagination
+            state.selection = initialInventoryState.selection
+            state.preferences = initialInventoryState.preferences
+          }),
+
+        // Stub implementations
+        setSelectedItem: () => {},
+        setLoading: () => {},
+        setError: () => {},
+        setSyncStatus: () => {},
+        setFilters: () => {},
+        setGlobalSearch: () => {},
+        setCategoryFilter: () => {},
+        setStatusFilter: () => {},
+        setSupplierFilter: () => {},
+        setStockLevelFilter: () => {},
+        setExpiryDateRange: () => {},
+        clearFilters: () => {},
+        setPagination: () => {},
+        setPage: () => {},
+        setLimit: () => {},
+        nextPage: () => {},
+        prevPage: () => {},
+        toggleSelectItem: () => {},
+        selectAll: () => {},
+        clearSelection: () => {},
+        setBulkOperation: () => {},
+        setMinimumStock: () => {},
+        bulkUpdateStock: () => {},
+        bulkMarkExpired: () => {},
+        bulkReorder: () => {},
+        dismissAlert: () => {},
+        getItemsByCategory: () => [],
+        getItemsBySupplier: () => [],
+        getExpiringItems: () => [],
+        setPreferences: () => {},
+        setDefaultView: () => {},
+        setItemsPerPage: () => {},
+        setSorting: () => {},
+        setOnlineStatus: () => {},
+        addToOfflineQueue: () => {},
+        processOfflineQueue: () => {},
+        clearOfflineQueue: () => {},
+        openForm: () => {},
+        closeForm: () => {},
+        updateFormField: () => {},
+        setFormErrors: () => {},
+        clearFormErrors: () => {},
+        resetForm: () => {},
+      })),
+      {
+        name: 'bergizi-inventory-store',
+        storage: createJSONStorage(() => localStorage),
+        partialize: (state) => ({
+          preferences: state.preferences,
+          filters: {
+            sortBy: state.filters.sortBy,
+            sortOrder: state.filters.sortOrder,
+            limit: state.filters.limit,
+          }
+        }),
+      }
+    ),
+    {
+      name: 'InventoryStore',
+    }
+  )
+)
+
+export default useInventoryStore

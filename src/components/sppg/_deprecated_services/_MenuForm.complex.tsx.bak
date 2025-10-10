@@ -1,0 +1,609 @@
+// MenuForm Component - Enterprise SPPG Menu Form
+// Bergizi-ID SaaS Platform
+
+'use client'
+
+import { type FC, useState, useEffect } from 'react'
+import { useRouter } from 'next/navigation'
+import { useForm } from 'react-hook-form'
+import { zodResolver } from '@hookform/resolvers/zod'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Textarea } from '@/components/ui/textarea'
+import { Card } from '@/components/ui/card'
+import {
+  Form,
+  FormControl,
+  FormDescription,
+  FormField,
+  FormItem,
+  FormLabel,
+  FormMessage,
+} from '@/components/ui/form'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
+import { Checkbox } from '@/components/ui/checkbox'
+import { Save, ArrowLeft, Loader2 } from 'lucide-react'
+import { createMenuSchema } from '../validators'
+// import { useMenuOperations } from '../hooks/useMenuServerActions' // TODO: Fix form implementation
+import { getMealTypeLabel } from '@/components/sppg/menu/utils'
+import type { CreateMenuInput, UpdateMenuInput, MenuWithDetails } from '../types'
+import type { MealType } from '@prisma/client'
+import { z } from 'zod'
+
+interface MenuFormProps {
+  mode: 'create' | 'edit'
+  initialData?: MenuWithDetails
+  programId?: string
+  onSuccess?: (menuId: string) => void
+  onCancel?: () => void
+}
+
+// Form schema for client-side validation
+const formSchema = createMenuSchema
+
+type FormData = z.infer<typeof formSchema>
+
+export const MenuForm: FC<MenuFormProps> = ({ 
+  mode,
+  initialData,
+  programId,
+  onSuccess,
+  onCancel
+}) => {
+  const router = useRouter()
+  const { menu } = useMenuOperations()
+  const { create: createAsync, update: updateAsync } = menu
+  const [isSubmitting, setIsSubmitting] = useState(false)
+
+  const form = useForm<FormData>({
+    resolver: zodResolver(formSchema),
+    defaultValues: initialData ? {
+      programId: initialData.programId,
+      menuName: initialData.menuName,
+      menuCode: initialData.menuCode,
+      mealType: initialData.mealType,
+      description: initialData.description || '',
+      servingSize: initialData.servingSize,
+      calories: initialData.calories,
+      protein: initialData.protein,
+      carbohydrates: initialData.carbohydrates,
+      fat: initialData.fat,
+      fiber: initialData.fiber,
+      calcium: initialData.calcium || 0,
+      iron: initialData.iron || 0,
+      vitaminA: initialData.vitaminA || 0,
+      vitaminC: initialData.vitaminC || 0,
+      costPerServing: initialData.costPerServing,
+      cookingTime: 0,
+      allergens: [],
+      ingredients: [],
+      isActive: initialData.isActive,
+      isHalal: initialData.isHalal,
+      isVegetarian: initialData.isVegetarian,
+    } : {
+      programId: programId || '',
+      menuName: '',
+      menuCode: '',
+      mealType: 'MAKAN_SIANG' as MealType,
+      description: '',
+      servingSize: 0,
+      calories: 0,
+      protein: 0,
+      carbohydrates: 0,
+      fat: 0,
+      fiber: 0,
+      calcium: 0,
+      iron: 0,
+      vitaminA: 0,
+      vitaminC: 0,
+      costPerServing: 0,
+      cookingTime: 0,
+      allergens: [],
+      ingredients: [],
+      isActive: true,
+      isHalal: true,
+      isVegetarian: false,
+    }
+  })
+
+  const handleSubmit = async (data: FormData) => {
+    setIsSubmitting(true)
+    try {
+      if (mode === 'create') {
+        await createAsync(data as CreateMenuInput)
+        if (onSuccess) {
+          onSuccess('success')
+        } else {
+          router.push('/menu')
+        }
+      } else if (mode === 'edit' && initialData) {
+        await updateAsync({ id: initialData.id, data: data as UpdateMenuInput })
+        if (onSuccess) {
+          onSuccess(initialData.id)
+        } else {
+          router.push(`/menu/${initialData.id}`)
+        }
+      }
+    } catch (error) {
+      // Error is handled by mutation onError
+      console.error('Form submit error:', error)
+    } finally {
+      setIsSubmitting(false)
+    }
+  }
+
+  const handleCancel = () => {
+    if (onCancel) {
+      onCancel()
+    } else {
+      router.back()
+    }
+  }
+
+  const mealTypes: MealType[] = [
+    'SARAPAN',
+    'SNACK_PAGI',
+    'MAKAN_SIANG',
+    'SNACK_SORE',
+    'MAKAN_MALAM'
+  ]
+
+  return (
+    <Form {...form}>
+      <form onSubmit={form.handleSubmit(handleSubmit)} className="space-y-6">
+        {/* Basic Information */}
+        <Card className="p-6">
+          <h3 className="text-lg font-semibold mb-4">Informasi Dasar</h3>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <FormField
+              control={form.control}
+              name="menuName"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Nama Menu *</FormLabel>
+                  <FormControl>
+                    <Input placeholder="Contoh: Nasi Goreng Spesial" {...field} />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+
+            <FormField
+              control={form.control}
+              name="menuCode"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Kode Menu *</FormLabel>
+                  <FormControl>
+                    <Input placeholder="Contoh: NGS-001" {...field} />
+                  </FormControl>
+                  <FormDescription>
+                    Kode unik untuk identifikasi menu
+                  </FormDescription>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+
+            <FormField
+              control={form.control}
+              name="mealType"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Jenis Makan *</FormLabel>
+                  <Select onValueChange={field.onChange} defaultValue={field.value}>
+                    <FormControl>
+                      <SelectTrigger>
+                        <SelectValue placeholder="Pilih jenis makan" />
+                      </SelectTrigger>
+                    </FormControl>
+                    <SelectContent>
+                      {mealTypes.map((type) => (
+                        <SelectItem key={type} value={type}>
+                          {getMealTypeLabel(type)}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+
+            <FormField
+              control={form.control}
+              name="servingSize"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Ukuran Porsi (gram) *</FormLabel>
+                  <FormControl>
+                    <Input 
+                      type="number" 
+                      placeholder="Contoh: 250" 
+                      {...field}
+                      onChange={(e) => field.onChange(parseFloat(e.target.value))}
+                    />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+          </div>
+
+          <div className="mt-4">
+            <FormField
+              control={form.control}
+              name="description"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Deskripsi</FormLabel>
+                  <FormControl>
+                    <Textarea 
+                      placeholder="Deskripsi menu..."
+                      className="min-h-[100px]"
+                      {...field}
+                    />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+          </div>
+        </Card>
+
+        {/* Nutrition Information */}
+        <Card className="p-6">
+          <h3 className="text-lg font-semibold mb-4">Informasi Gizi</h3>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <FormField
+              control={form.control}
+              name="calories"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Kalori (kcal) *</FormLabel>
+                  <FormControl>
+                    <Input 
+                      type="number" 
+                      placeholder="0" 
+                      {...field}
+                      onChange={(e) => field.onChange(parseFloat(e.target.value))}
+                    />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+
+            <FormField
+              control={form.control}
+              name="protein"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Protein (g) *</FormLabel>
+                  <FormControl>
+                    <Input 
+                      type="number" 
+                      placeholder="0" 
+                      {...field}
+                      onChange={(e) => field.onChange(parseFloat(e.target.value))}
+                    />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+
+            <FormField
+              control={form.control}
+              name="carbohydrates"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Karbohidrat (g) *</FormLabel>
+                  <FormControl>
+                    <Input 
+                      type="number" 
+                      placeholder="0" 
+                      {...field}
+                      onChange={(e) => field.onChange(parseFloat(e.target.value))}
+                    />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+
+            <FormField
+              control={form.control}
+              name="fat"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Lemak (g) *</FormLabel>
+                  <FormControl>
+                    <Input 
+                      type="number" 
+                      placeholder="0" 
+                      {...field}
+                      onChange={(e) => field.onChange(parseFloat(e.target.value))}
+                    />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+
+            <FormField
+              control={form.control}
+              name="fiber"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Serat (g) *</FormLabel>
+                  <FormControl>
+                    <Input 
+                      type="number" 
+                      placeholder="0" 
+                      {...field}
+                      onChange={(e) => field.onChange(parseFloat(e.target.value))}
+                    />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+
+            <FormField
+              control={form.control}
+              name="calcium"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Kalsium (mg)</FormLabel>
+                  <FormControl>
+                    <Input 
+                      type="number" 
+                      placeholder="0" 
+                      {...field}
+                      onChange={(e) => field.onChange(parseFloat(e.target.value))}
+                    />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+
+            <FormField
+              control={form.control}
+              name="iron"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Zat Besi (mg)</FormLabel>
+                  <FormControl>
+                    <Input 
+                      type="number" 
+                      placeholder="0" 
+                      {...field}
+                      onChange={(e) => field.onChange(parseFloat(e.target.value))}
+                    />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+
+            <FormField
+              control={form.control}
+              name="vitaminA"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Vitamin A (mcg)</FormLabel>
+                  <FormControl>
+                    <Input 
+                      type="number" 
+                      placeholder="0" 
+                      {...field}
+                      onChange={(e) => field.onChange(parseFloat(e.target.value))}
+                    />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+
+            <FormField
+              control={form.control}
+              name="vitaminC"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Vitamin C (mg)</FormLabel>
+                  <FormControl>
+                    <Input 
+                      type="number" 
+                      placeholder="0" 
+                      {...field}
+                      onChange={(e) => field.onChange(parseFloat(e.target.value))}
+                    />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+          </div>
+        </Card>
+
+        {/* Cost & Time */}
+        <Card className="p-6">
+          <h3 className="text-lg font-semibold mb-4">Biaya & Waktu</h3>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <FormField
+              control={form.control}
+              name="costPerServing"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Biaya per Porsi (Rp) *</FormLabel>
+                  <FormControl>
+                    <Input 
+                      type="number" 
+                      placeholder="0" 
+                      {...field}
+                      onChange={(e) => field.onChange(parseFloat(e.target.value))}
+                    />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+
+            <FormField
+              control={form.control}
+              name="preparationTime"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Waktu Persiapan (menit)</FormLabel>
+                  <FormControl>
+                    <Input 
+                      type="number" 
+                      placeholder="0" 
+                      {...field}
+                      onChange={(e) => field.onChange(parseInt(e.target.value))}
+                    />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+
+            <FormField
+              control={form.control}
+              name="cookingTime"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Waktu Memasak (menit)</FormLabel>
+                  <FormControl>
+                    <Input 
+                      type="number" 
+                      placeholder="0" 
+                      {...field}
+                      onChange={(e) => field.onChange(parseInt(e.target.value))}
+                    />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+          </div>
+        </Card>
+
+        {/* Settings */}
+        <Card className="p-6">
+          <h3 className="text-lg font-semibold mb-4">Pengaturan</h3>
+          <div className="space-y-4">
+            <FormField
+              control={form.control}
+              name="isActive"
+              render={({ field }) => (
+                <FormItem className="flex flex-row items-start space-x-3 space-y-0">
+                  <FormControl>
+                    <Checkbox
+                      checked={field.value}
+                      onCheckedChange={field.onChange}
+                    />
+                  </FormControl>
+                  <div className="space-y-1 leading-none">
+                    <FormLabel>
+                      Menu Aktif
+                    </FormLabel>
+                    <FormDescription>
+                      Menu yang aktif dapat digunakan dalam produksi dan distribusi
+                    </FormDescription>
+                  </div>
+                </FormItem>
+              )}
+            />
+
+            <FormField
+              control={form.control}
+              name="isHalal"
+              render={({ field }) => (
+                <FormItem className="flex flex-row items-start space-x-3 space-y-0">
+                  <FormControl>
+                    <Checkbox
+                      checked={field.value}
+                      onCheckedChange={field.onChange}
+                    />
+                  </FormControl>
+                  <div className="space-y-1 leading-none">
+                    <FormLabel>
+                      Menu Halal
+                    </FormLabel>
+                    <FormDescription>
+                      Menu ini menggunakan bahan-bahan halal
+                    </FormDescription>
+                  </div>
+                </FormItem>
+              )}
+            />
+
+            <FormField
+              control={form.control}
+              name="isVegetarian"
+              render={({ field }) => (
+                <FormItem className="flex flex-row items-start space-x-3 space-y-0">
+                  <FormControl>
+                    <Checkbox
+                      checked={field.value}
+                      onCheckedChange={field.onChange}
+                    />
+                  </FormControl>
+                  <div className="space-y-1 leading-none">
+                    <FormLabel>
+                      Menu Vegetarian
+                    </FormLabel>
+                    <FormDescription>
+                      Menu ini tidak mengandung daging atau produk hewani
+                    </FormDescription>
+                  </div>
+                </FormItem>
+              )}
+            />
+          </div>
+        </Card>
+
+        {/* Form Actions */}
+        <div className="flex items-center gap-4">
+          <Button
+            type="submit"
+            disabled={isSubmitting}
+            className="min-w-[120px]"
+          >
+            {isSubmitting ? (
+              <>
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                Menyimpan...
+              </>
+            ) : (
+              <>
+                <Save className="mr-2 h-4 w-4" />
+                {mode === 'create' ? 'Buat Menu' : 'Simpan Perubahan'}
+              </>
+            )}
+          </Button>
+
+          <Button
+            type="button"
+            variant="outline"
+            onClick={handleCancel}
+            disabled={isSubmitting}
+          >
+            <ArrowLeft className="mr-2 h-4 w-4" />
+            Batal
+          </Button>
+        </div>
+      </form>
+    </Form>
+  )
+}

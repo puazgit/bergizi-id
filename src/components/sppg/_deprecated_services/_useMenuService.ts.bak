@@ -1,0 +1,914 @@
+// Menu Business Logic Hooks - Component-Level Implementation  
+// Consolidating MenuService + MenuRepository logic into React hooks
+// src/components/sppg/menu/hooks/useMenuService.ts
+
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import db from '@/lib/db'
+import { type Session } from 'next-auth'
+import { useSession } from 'next-auth/react'
+import type { MealType, ProgramType, TargetGroup } from '@prisma/client'
+
+// Import schemas from menu utils - deprecated service
+import {
+  createProgramSchema,
+  updateProgramSchema,
+  menuSchema,
+  updateMenuSchema
+} from '../menu/utils/menuSchemas'
+
+// Service result types
+export interface ServiceResult<T> {
+  success: boolean
+  data?: T
+  error?: string
+  errors?: Record<string, string[]>
+}
+
+export interface PaginatedResult<T> {
+  data: T[]
+  pagination: {
+    page: number
+    limit: number
+    total: number
+    pages: number
+  }
+}
+
+// Menu types - consolidating from domain
+export interface MenuWithRelations {
+  id: string
+  programId: string
+  menuName: string
+  menuCode: string
+  description?: string
+  mealType: MealType
+  servingSize: number
+  calories: number
+  protein: number
+  carbohydrates: number
+  fat: number
+  fiber: number
+  costPerServing: number
+  isActive: boolean
+  createdAt: Date
+  updatedAt: Date
+  program: {
+    id: string
+    programName: string
+    sppgId: string
+  }
+  ingredients?: Array<{
+    id: string
+    inventoryItem: {
+      id: string
+      itemName: string
+      unit: string
+    }
+  }>
+}
+
+export interface ProgramWithMenus {
+  id: string
+  programName: string
+  sppgId: string
+  programType: ProgramType
+  targetGroup: TargetGroup
+  status: string
+  startDate: Date
+  endDate?: Date
+  targetRecipients: number
+  createdAt: Date
+  updatedAt: Date
+  nutritionMenus?: MenuWithRelations[]
+  _count?: {
+    nutritionMenus: number
+  }
+}
+
+// Input types - using zod infer
+export type CreateProgramInput = Parameters<typeof createProgramSchema.parse>[0]
+export type UpdateProgramInput = Parameters<typeof updateProgramSchema.parse>[0]
+export type CreateMenuInput = Parameters<typeof menuSchema.parse>[0]
+export type UpdateMenuInput = Parameters<typeof updateMenuSchema.parse>[0]
+
+// Filter types
+export interface ProgramFilters {
+  programType?: ProgramType
+  targetGroup?: TargetGroup
+  status?: string
+  startDate?: Date
+  endDate?: Date
+  search?: string
+}
+
+export interface MenuFilters {
+  mealType?: MealType
+  minCalories?: number
+  maxCalories?: number
+  search?: string
+}
+
+export interface PaginationParams {
+  page?: number
+  limit?: number
+  sortBy?: string
+  sortOrder?: 'asc' | 'desc'
+}
+
+// Analytics types
+export interface MenuAnalytics {
+  totalMenus: number
+  totalPrograms: number
+  avgCaloriesPerMenu: number
+  avgProteinPerMenu: number
+  menusByMealType: Array<{
+    mealType: MealType
+    count: number
+  }>
+  nutritionTrends: {
+    calories: number[]
+    protein: number[]
+    dates: string[]
+  }
+  recentActivity: Array<{
+    id: string
+    menuName: string
+    programName: string
+    updatedAt: Date
+  }>
+}
+
+// ================================ PROGRAM HOOKS ================================
+
+export function usePrograms(options: {
+  filters?: ProgramFilters
+  pagination?: PaginationParams
+  includeMenus?: boolean
+  includeStats?: boolean
+} = {}) {
+  const { data: session } = useSession()
+  
+  return useQuery({
+    queryKey: ['programs', session?.user?.sppgId, options],
+    queryFn: () => {
+      if (!session?.user?.sppgId) throw new Error('No SPPG ID')
+      return findProgramsBySppgId(session.user.sppgId, options)
+    },
+    enabled: !!session?.user?.sppgId,
+    staleTime: 5 * 60 * 1000, // 5 minutes
+  })
+}
+
+export function useProgram(programId: string, options: {
+  includeMenus?: boolean
+  includeStats?: boolean
+} = {}) {
+  const { data: session } = useSession()
+  
+  return useQuery({
+    queryKey: ['program', programId, options],
+    queryFn: () => {
+      if (!session?.user?.sppgId) throw new Error('No SPPG ID')
+      return findProgramById(programId, session.user.sppgId, options)
+    },
+    enabled: !!programId && !!session?.user?.sppgId,
+  })
+}
+
+export function useCreateProgram() {
+  const { data: session } = useSession()
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: (input: CreateProgramInput) => {
+      if (!session?.user?.sppgId) throw new Error('No SPPG ID')
+      return createProgram(input, session.user.sppgId)
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['programs'] })
+    },
+  })
+}
+
+export function useUpdateProgram() {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ programId, input }: { programId: string; input: UpdateProgramInput }) =>
+      updateProgram(programId, input),
+    onSuccess: (_, { programId }) => {
+      queryClient.invalidateQueries({ queryKey: ['programs'] })
+      queryClient.invalidateQueries({ queryKey: ['program', programId] })
+    },
+  })
+}
+
+export function useDeleteProgram() {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: (programId: string) => deleteProgram(programId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['programs'] })
+    },
+  })
+}
+
+// ================================ MENU HOOKS ================================
+
+export function useMenus(options: {
+  programId?: string
+  filters?: MenuFilters
+  pagination?: PaginationParams
+  includeStats?: boolean
+} = {}) {
+  const { data: session } = useSession()
+  
+  return useQuery({
+    queryKey: ['menus', session?.user?.sppgId, options],
+    queryFn: () => {
+      if (!session?.user?.sppgId) throw new Error('No SPPG ID')
+      return findMenusBySppgId(session.user.sppgId, options)
+    },
+    enabled: !!session?.user?.sppgId,
+    staleTime: 5 * 60 * 1000,
+  })
+}
+
+export function useMenu(menuId: string, options: {
+  includeIngredients?: boolean
+  includeNutrition?: boolean
+  includeCosts?: boolean
+} = {}) {
+  const { data: session } = useSession()
+  
+  return useQuery({
+    queryKey: ['menu', menuId, options],
+    queryFn: () => {
+      if (!session?.user?.sppgId) throw new Error('No SPPG ID')
+      return findMenuById(menuId, session.user.sppgId, options)
+    },
+    enabled: !!menuId && !!session?.user?.sppgId,
+  })
+}
+
+export function useCreateMenu() {
+  const { data: session } = useSession()
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: (input: CreateMenuInput) => {
+      if (!session?.user?.sppgId) throw new Error('No SPPG ID')
+      return createMenu(input, session.user.sppgId)
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['menus'] })
+      queryClient.invalidateQueries({ queryKey: ['programs'] }) // May affect program stats
+    },
+  })
+}
+
+export function useUpdateMenu() {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ menuId, input }: { menuId: string; input: UpdateMenuInput }) =>
+      updateMenu(menuId, input),
+    onSuccess: (_, { menuId }) => {
+      queryClient.invalidateQueries({ queryKey: ['menus'] })
+      queryClient.invalidateQueries({ queryKey: ['menu', menuId] })
+    },
+  })
+}
+
+export function useDeleteMenu() {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: (menuId: string) => deleteMenu(menuId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['menus'] })
+    },
+  })
+}
+
+// ================================ ANALYTICS HOOKS ================================
+
+export function useMenuAnalytics(timeRange: '7d' | '30d' | '90d' = '30d') {
+  const { data: session } = useSession()
+  
+  return useQuery({
+    queryKey: ['menu-analytics', session?.user?.sppgId, timeRange],
+    queryFn: () => {
+      if (!session?.user?.sppgId) throw new Error('No SPPG ID')
+      return getMenuAnalytics(session.user.sppgId, timeRange)
+    },
+    enabled: !!session?.user?.sppgId,
+    staleTime: 10 * 60 * 1000, // 10 minutes
+  })
+}
+
+// ================================ BUSINESS LOGIC FUNCTIONS ================================
+// Consolidated from MenuService + MenuRepository
+
+// PROGRAM OPERATIONS
+async function findProgramsBySppgId(
+  sppgId: string,
+  options: {
+    filters?: ProgramFilters
+    pagination?: PaginationParams
+    includeMenus?: boolean
+    includeStats?: boolean
+  } = {}
+): Promise<PaginatedResult<ProgramWithMenus>> {
+  const { filters = {}, pagination = {}, includeMenus = false, includeStats = false } = options
+  const { page = 1, limit = 10, sortBy = 'createdAt', sortOrder = 'desc' } = pagination
+
+  // Build where clause with multi-tenant security
+  const where = {
+    sppgId, // CRITICAL: Multi-tenant isolation
+    ...(filters.programType && { programType: filters.programType }),
+    ...(filters.targetGroup && { targetGroup: filters.targetGroup }),
+    ...(filters.status && { status: filters.status }),
+    ...(filters.startDate && { startDate: { gte: filters.startDate } }),
+    ...(filters.endDate && { endDate: { lte: filters.endDate } }),
+    ...(filters.search && {
+      OR: [
+        { programName: { contains: filters.search, mode: 'insensitive' as const } },
+        { description: { contains: filters.search, mode: 'insensitive' as const } }
+      ]
+    })
+  }
+
+  const [programs, total] = await Promise.all([
+    db.nutritionProgram.findMany({
+      where,
+      skip: (page - 1) * limit,
+      take: limit,
+      orderBy: { [sortBy]: sortOrder },
+      include: {
+        ...(includeMenus && {
+          nutritionMenus: {
+            include: {
+              ingredients: {
+                include: {
+                  inventoryItem: true
+                }
+              }
+            }
+          }
+        }),
+        ...(includeStats && {
+          _count: {
+            select: {
+              menus: true
+            }
+          }
+        })
+      }
+    }),
+    db.nutritionProgram.count({ where })
+  ])
+
+  return {
+    data: programs as ProgramWithMenus[],
+    pagination: {
+      page,
+      limit,
+      total,
+      pages: Math.ceil(total / limit)
+    }
+  }
+}
+
+async function findProgramById(
+  programId: string,
+  sppgId: string,
+  options: {
+    includeMenus?: boolean
+    includeStats?: boolean
+  } = {}
+): Promise<ProgramWithMenus | null> {
+  const { includeMenus = false, includeStats = false } = options
+
+  return db.nutritionProgram.findFirst({
+    where: {
+      id: programId,
+      sppgId // CRITICAL: Multi-tenant isolation
+    },
+    include: {
+      ...(includeMenus && {
+        nutritionMenus: {
+          include: {
+            ingredients: {
+              include: {
+                inventoryItem: true
+              }
+            }
+          }
+        }
+      }),
+      ...(includeStats && {
+        _count: {
+          select: {
+            nutritionMenus: true
+          }
+        }
+      })
+    }
+  }) as Promise<ProgramWithMenus | null>
+}
+
+async function createProgram(
+  input: CreateProgramInput,
+  sppgId: string
+): Promise<ServiceResult<ProgramWithMenus>> {
+  try {
+    // 1. Validation
+    const validated = createProgramSchema.safeParse(input)
+    if (!validated.success) {
+      return {
+        success: false,
+        errors: validated.error.flatten().fieldErrors
+      }
+    }
+
+    // 2. Business rules validation
+    const existingProgram = await db.nutritionProgram.findFirst({
+      where: {
+        sppgId,
+        programName: validated.data.programName
+      }
+    })
+
+    if (existingProgram) {
+      return {
+        success: false,
+        error: 'Program dengan nama tersebut sudah ada'
+      }
+    }
+
+    // 3. Create program
+    const program = await db.nutritionProgram.create({
+      data: {
+        ...validated.data,
+        sppgId, // CRITICAL: Multi-tenant isolation
+        status: 'DRAFT'
+      },
+      include: {
+        nutritionMenus: true,
+        _count: {
+          select: {
+            nutritionMenus: true
+          }
+        }
+      }
+    }) as ProgramWithMenus
+
+    return {
+      success: true,
+      data: program
+    }
+  } catch (error) {
+    console.error('Create program error:', error)
+    return {
+      success: false,
+      error: 'Gagal membuat program'
+    }
+  }
+}
+
+async function updateProgram(
+  programId: string,
+  input: UpdateProgramInput
+): Promise<ServiceResult<ProgramWithMenus>> {
+  try {
+    // 1. Validation
+    const validated = updateProgramSchema.safeParse(input)
+    if (!validated.success) {
+      return {
+        success: false,
+        errors: validated.error.flatten().fieldErrors
+      }
+    }
+
+    // 2. Update program
+    const program = await db.nutritionProgram.update({
+      where: { id: programId },
+      data: validated.data,
+      include: {
+        nutritionMenus: true,
+        _count: {
+          select: {
+            nutritionMenus: true
+          }
+        }
+      }
+    }) as ProgramWithMenus
+
+    return {
+      success: true,
+      data: program
+    }
+  } catch (error) {
+    console.error('Update program error:', error)
+    return {
+      success: false,
+      error: 'Gagal mengupdate program'
+    }
+  }
+}
+
+async function deleteProgram(programId: string): Promise<ServiceResult<void>> {
+  try {
+    // Check for dependencies
+    const menuCount = await db.nutritionMenu.count({
+      where: { programId }
+    })
+
+    if (menuCount > 0) {
+      return {
+        success: false,
+        error: 'Tidak dapat menghapus program yang memiliki menu'
+      }
+    }
+
+    await db.nutritionProgram.delete({
+      where: { id: programId }
+    })
+
+    return {
+      success: true,
+      data: undefined
+    }
+  } catch (error) {
+    console.error('Delete program error:', error)
+    return {
+      success: false,
+      error: 'Gagal menghapus program'
+    }
+  }
+}
+
+// MENU OPERATIONS  
+async function findMenusBySppgId(
+  sppgId: string,
+  options: {
+    programId?: string
+    filters?: MenuFilters
+    pagination?: PaginationParams
+    includeStats?: boolean
+  } = {}
+): Promise<PaginatedResult<MenuWithRelations>> {
+  const { programId, filters = {}, pagination = {}, includeStats = false } = options
+  const { page = 1, limit = 10, sortBy = 'createdAt', sortOrder = 'desc' } = pagination
+
+  // Build where clause with multi-tenant security
+  const where = {
+    program: {
+      sppgId // CRITICAL: Multi-tenant isolation through program relation
+    },
+    ...(programId && { programId }),
+    ...(filters.mealType && { mealType: filters.mealType }),
+    ...(filters.status && { status: filters.status }),
+    ...(filters.minCalories && { calories: { gte: filters.minCalories } }),
+    ...(filters.maxCalories && { calories: { lte: filters.maxCalories } }),
+    ...(filters.search && {
+      OR: [
+        { menuName: { contains: filters.search, mode: 'insensitive' as const } },
+        { menuCode: { contains: filters.search, mode: 'insensitive' as const } }
+      ]
+    })
+  }
+
+  const [menus, total] = await Promise.all([
+    db.nutritionMenu.findMany({
+      where,
+      skip: (page - 1) * limit,
+      take: limit,
+      orderBy: { [sortBy]: sortOrder },
+      include: {
+        program: {
+          select: {
+            id: true,
+            programName: true,
+            sppgId: true
+          }
+        },
+        ingredients: {
+          include: {
+            inventoryItem: true
+          }
+        },
+        ...(includeStats && {
+          _count: {
+            select: {
+              ingredients: true
+            }
+          }
+        })
+      }
+    }),
+    db.nutritionMenu.count({ where })
+  ])
+
+  return {
+    data: menus as MenuWithRelations[],
+    pagination: {
+      page,
+      limit,
+      total,
+      pages: Math.ceil(total / limit)
+    }
+  }
+}
+
+async function findMenuById(
+  menuId: string,
+  sppgId: string,
+  options: {
+    includeIngredients?: boolean
+    includeNutrition?: boolean
+    includeCosts?: boolean
+  } = {}
+): Promise<MenuWithRelations | null> {
+  const { includeIngredients = true } = options
+
+  return db.nutritionMenu.findFirst({
+    where: {
+      id: menuId,
+      program: {
+        sppgId // CRITICAL: Multi-tenant isolation
+      }
+    },
+    include: {
+      program: {
+        select: {
+          id: true,
+          programName: true,
+          sppgId: true
+        }
+      },
+      ...(includeIngredients && {
+        ingredients: {
+          include: {
+            inventoryItem: true
+          }
+        }
+      })
+    }
+  }) as Promise<MenuWithRelations | null>
+}
+
+async function createMenu(
+  input: CreateMenuInput,
+  sppgId: string
+): Promise<ServiceResult<MenuWithRelations>> {
+  try {
+    // 1. Validation
+    const validated = menuSchema.safeParse(input)
+    if (!validated.success) {
+      return {
+        success: false,
+        errors: validated.error.flatten().fieldErrors
+      }
+    }
+
+    // 2. Verify program ownership
+    const program = await db.nutritionProgram.findFirst({
+      where: {
+        id: validated.data.programId,
+        sppgId // CRITICAL: Multi-tenant isolation
+      }
+    })
+
+    if (!program) {
+      return {
+        success: false,
+        error: 'Program tidak ditemukan atau tidak memiliki akses'
+      }
+    }
+
+    // 3. Check for duplicate menu code
+    const existingMenu = await db.nutritionMenu.findFirst({
+      where: {
+        menuCode: validated.data.menuCode,
+        program: {
+          sppgId
+        }
+      }
+    })
+
+    if (existingMenu) {
+      return {
+        success: false,
+        error: 'Kode menu sudah digunakan'
+      }
+    }
+
+    // 4. Create menu
+    const menu = await db.nutritionMenu.create({
+      data: validated.data,
+      include: {
+        program: {
+          select: {
+            id: true,
+            programName: true,
+            sppgId: true
+          }
+        },
+        ingredients: {
+          include: {
+            inventoryItem: true
+          }
+        }
+      }
+    }) as MenuWithRelations
+
+    return {
+      success: true,
+      data: menu
+    }
+  } catch (error) {
+    console.error('Create menu error:', error)
+    return {
+      success: false,
+      error: 'Gagal membuat menu'
+    }
+  }
+}
+
+async function updateMenu(
+  menuId: string,
+  input: UpdateMenuInput
+): Promise<ServiceResult<MenuWithRelations>> {
+  try {
+    // 1. Validation
+    const validated = updateMenuSchema.safeParse(input)
+    if (!validated.success) {
+      return {
+        success: false,
+        errors: validated.error.flatten().fieldErrors
+      }
+    }
+
+    // 2. Update menu
+    const menu = await db.nutritionMenu.update({
+      where: { id: menuId },
+      data: validated.data,
+      include: {
+        program: {
+          select: {
+            id: true,
+            programName: true,
+            sppgId: true
+          }
+        },
+        ingredients: {
+          include: {
+            inventoryItem: true
+          }
+        }
+      }
+    }) as MenuWithRelations
+
+    return {
+      success: true,
+      data: menu
+    }
+  } catch (error) {
+    console.error('Update menu error:', error)
+    return {
+      success: false,
+      error: 'Gagal mengupdate menu'
+    }
+  }
+}
+
+async function deleteMenu(menuId: string): Promise<ServiceResult<void>> {
+  try {
+    await db.nutritionMenu.delete({
+      where: { id: menuId }
+    })
+
+    return {
+      success: true,
+      data: undefined
+    }
+  } catch (error) {
+    console.error('Delete menu error:', error)
+    return {
+      success: false,
+      error: 'Gagal menghapus menu'
+    }
+  }
+}
+
+// ANALYTICS OPERATIONS
+async function getMenuAnalytics(
+  sppgId: string,
+  timeRange: '7d' | '30d' | '90d' = '30d'
+): Promise<MenuAnalytics> {
+  const days = timeRange === '7d' ? 7 : timeRange === '30d' ? 30 : 90
+  const startDate = new Date()
+  startDate.setDate(startDate.getDate() - days)
+
+  const [
+    totalMenus,
+    totalPrograms,
+    menusByMealType,
+    avgNutritionScores,
+    recentActivity
+  ] = await Promise.all([
+    // Total menus
+    db.nutritionMenu.count({
+      where: {
+        program: { sppgId },
+        createdAt: { gte: startDate }
+      }
+    }),
+
+    // Total programs
+    db.nutritionProgram.count({
+      where: {
+        sppgId,
+        createdAt: { gte: startDate }
+      }
+    }),
+
+    // Menus by meal type
+    db.nutritionMenu.groupBy({
+      by: ['mealType'],
+      where: {
+        program: { sppgId },
+        createdAt: { gte: startDate }
+      },
+      _count: {
+        id: true
+      }
+    }),
+
+    // Average nutrition scores (mock calculation)
+    db.nutritionMenu.aggregate({
+      where: {
+        program: { sppgId },
+        createdAt: { gte: startDate }
+      },
+      _avg: {
+        calories: true,
+        protein: true,
+        carbohydrates: true,
+        fat: true
+      }
+    }),
+
+    // Recent activity
+    db.nutritionMenu.findMany({
+      where: {
+        program: { sppgId },
+        updatedAt: { gte: startDate }
+      },
+      select: {
+        id: true,
+        menuName: true,
+        updatedAt: true,
+        program: {
+          select: {
+            programName: true
+          }
+        }
+      },
+      orderBy: {
+        updatedAt: 'desc'
+      },
+      take: 10
+    })
+  ])
+
+  return {
+    totalMenus,
+    totalPrograms,
+    avgCaloriesPerMenu: Math.round(avgNutritionScores._avg.calories || 0),
+    avgProteinPerMenu: Math.round((avgNutritionScores._avg.protein || 0) * 10) / 10,
+    menusByMealType: menusByMealType.map((item: { mealType: MealType; _count: { id: number } }) => ({
+      mealType: item.mealType,
+      count: item._count.id
+    })),
+    nutritionTrends: {
+      // Mock data - would calculate actual trends from historical data
+      calories: [450, 475, 460, 480, 465, 470, 485],
+      protein: [15, 16, 14, 17, 15, 16, 18],
+      dates: Array.from({ length: 7 }, (_, i) => {
+        const date = new Date()
+        date.setDate(date.getDate() - (6 - i))
+        return date.toISOString().split('T')[0]
+      })
+    },
+    recentActivity: recentActivity.map((menu: { id: string; menuName: string; updatedAt: Date; program: { programName: string } }) => ({
+      id: menu.id,
+      menuName: menu.menuName,
+      programName: menu.program.programName,
+      updatedAt: menu.updatedAt
+    }))
+  }
+}

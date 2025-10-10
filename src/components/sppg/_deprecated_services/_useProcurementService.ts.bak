@@ -1,0 +1,892 @@
+// Procurement Business Logic Hooks - Component-Level Implementation
+// Consolidating ProcurementService + ProcurementRepository logic into React hooks
+// src/components/sppg/procurement/hooks/useProcurementService.ts
+
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import db from '@/lib/db'
+import { useSession } from 'next-auth/react'
+import type { 
+  InventoryCategory,
+  DeliveryStatus,
+  PaymentStatus,
+  ProcurementStatus,
+  SupplierType 
+} from '@prisma/client'
+
+// Import schemas from procurement utils - deprecated service
+import {
+  createProcurementSchema,
+  updateProcurementSchema,
+  createProcurementPlanSchema,
+  updateProcurementPlanSchema
+} from '../procurement/utils/procurementSchemas'
+
+// ================================ TYPES ================================
+
+export interface ServiceResult<T> {
+  success: boolean
+  data?: T
+  error?: string
+  errors?: Record<string, string[]>
+}
+
+export interface PaginatedResult<T> {
+  data: T[]
+  pagination: {
+    page: number
+    limit: number
+    total: number
+    pages: number
+  }
+}
+
+// Procurement types - consolidating from domain
+export interface ProcurementWithDetails {
+  id: string
+  sppgId: string
+  procurementCode: string
+  procurementDate: Date
+  expectedDeliveryDate?: Date
+  actualDeliveryDate?: Date
+  
+  // Supplier Information
+  supplierName: string
+  supplierContact?: string
+  supplierAddress?: string
+  supplierEmail?: string
+  supplierType?: SupplierType
+  
+  // Status
+  deliveryStatus: DeliveryStatus
+  paymentStatus: PaymentStatus
+  status: ProcurementStatus
+  
+  // Financial
+  totalAmount: number
+  paidAmount: number
+  remainingAmount: number
+  
+  // Notes
+  notes?: string
+  
+  createdAt: Date
+  updatedAt: Date
+  
+  // Relations
+  items?: ProcurementItemWithDetails[]
+  plan?: {
+    id: string
+    planName: string
+  }
+}
+
+export interface ProcurementItemWithDetails {
+  id: string
+  procurementId: string
+  inventoryItemId?: string
+  itemName: string
+  itemCode?: string
+  category: InventoryCategory
+  brand?: string
+  orderedQuantity: number
+  receivedQuantity: number
+  unit: string
+  unitPrice: number
+  totalPrice: number
+  notes?: string
+  
+  // Relations
+  inventoryItem?: {
+    id: string
+    itemName: string
+    currentStock: number
+  }
+}
+
+export interface ProcurementPlanWithDetails {
+  id: string
+  sppgId: string
+  planName: string
+  planCode: string
+  description?: string
+  planDate: Date
+  targetMonth: Date
+  status: string
+  totalBudget: number
+  usedBudget: number
+  remainingBudget: number
+  createdAt: Date
+  updatedAt: Date
+  
+  // Relations  
+  procurements?: ProcurementWithDetails[]
+  _count?: {
+    procurements: number
+  }
+}
+
+// Input types - using zod infer
+export type CreateProcurementInput = Parameters<typeof createProcurementSchema.parse>[0]
+export type UpdateProcurementInput = Parameters<typeof updateProcurementSchema.parse>[0]
+export type CreateProcurementPlanInput = Parameters<typeof createProcurementPlanSchema.parse>[0]
+export type UpdateProcurementPlanInput = Parameters<typeof updateProcurementPlanSchema.parse>[0]
+
+// Filter types
+export interface ProcurementFilters {
+  deliveryStatus?: DeliveryStatus | DeliveryStatus[]
+  paymentStatus?: PaymentStatus | PaymentStatus[]
+  status?: ProcurementStatus
+  supplierName?: string
+  supplierType?: SupplierType
+  dateFrom?: Date
+  dateTo?: Date
+  amountMin?: number
+  amountMax?: number
+  search?: string
+}
+
+export interface PaginationParams {
+  page?: number
+  limit?: number
+  sortBy?: string
+  sortOrder?: 'asc' | 'desc'
+}
+
+export interface ProcurementListQuery {
+  filters?: ProcurementFilters
+  pagination?: PaginationParams
+}
+
+// ================================ PROCUREMENT HOOKS ================================
+
+export function useProcurements(options: {
+  filters?: ProcurementFilters
+  pagination?: PaginationParams
+} = {}) {
+  const { data: session } = useSession()
+  
+  return useQuery({
+    queryKey: ['procurements', session?.user?.sppgId, options],
+    queryFn: () => {
+      if (!session?.user?.sppgId) throw new Error('No SPPG ID')
+      return findProcurementsBySppgId(session.user.sppgId, options)
+    },
+    enabled: !!session?.user?.sppgId,
+    staleTime: 3 * 60 * 1000, // 3 minutes
+  })
+}
+
+export function useProcurement(procurementId: string) {
+  const { data: session } = useSession()
+  
+  return useQuery({
+    queryKey: ['procurement', procurementId],
+    queryFn: () => {
+      if (!session?.user?.sppgId) throw new Error('No SPPG ID')
+      return findProcurementById(procurementId, session.user.sppgId)
+    },
+    enabled: !!procurementId && !!session?.user?.sppgId,
+  })
+}
+
+export function useCreateProcurement() {
+  const { data: session } = useSession()
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: (input: CreateProcurementInput) => {
+      if (!session?.user?.sppgId) throw new Error('No SPPG ID')
+      return createProcurement(input, session.user.sppgId)
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['procurements'] })
+      queryClient.invalidateQueries({ queryKey: ['procurement-stats'] })
+    },
+  })
+}
+
+export function useUpdateProcurement() {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ procurementId, input }: { procurementId: string; input: UpdateProcurementInput }) =>
+      updateProcurement(procurementId, input),
+    onSuccess: (_, { procurementId }) => {
+      queryClient.invalidateQueries({ queryKey: ['procurements'] })
+      queryClient.invalidateQueries({ queryKey: ['procurement', procurementId] })
+      queryClient.invalidateQueries({ queryKey: ['procurement-stats'] })
+    },
+  })
+}
+
+export function useDeleteProcurement() {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: (procurementId: string) => deleteProcurement(procurementId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['procurements'] })
+      queryClient.invalidateQueries({ queryKey: ['procurement-stats'] })
+    },
+  })
+}
+
+// ================================ PROCUREMENT PLAN HOOKS ================================
+
+export function useProcurementPlans(options: {
+  filters?: { status?: string; search?: string }
+  pagination?: PaginationParams
+} = {}) {
+  const { data: session } = useSession()
+  
+  return useQuery({
+    queryKey: ['procurement-plans', session?.user?.sppgId, options],
+    queryFn: () => {
+      if (!session?.user?.sppgId) throw new Error('No SPPG ID')
+      return findProcurementPlansBySppgId(session.user.sppgId, options)
+    },
+    enabled: !!session?.user?.sppgId,
+    staleTime: 5 * 60 * 1000, // 5 minutes
+  })
+}
+
+export function useProcurementPlan(planId: string) {
+  const { data: session } = useSession()
+  
+  return useQuery({
+    queryKey: ['procurement-plan', planId],
+    queryFn: () => {
+      if (!session?.user?.sppgId) throw new Error('No SPPG ID')
+      return findProcurementPlanById(planId, session.user.sppgId)
+    },
+    enabled: !!planId && !!session?.user?.sppgId,
+  })
+}
+
+export function useCreateProcurementPlan() {
+  const { data: session } = useSession()
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: (input: CreateProcurementPlanInput) => {
+      if (!session?.user?.sppgId) throw new Error('No SPPG ID')
+      return createProcurementPlan(input, session.user.sppgId)
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['procurement-plans'] })
+    },
+  })
+}
+
+export function useUpdateProcurementPlan() {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ planId, input }: { planId: string; input: UpdateProcurementPlanInput }) =>
+      updateProcurementPlan(planId, input),
+    onSuccess: (_, { planId }) => {
+      queryClient.invalidateQueries({ queryKey: ['procurement-plans'] })
+      queryClient.invalidateQueries({ queryKey: ['procurement-plan', planId] })
+    },
+  })
+}
+
+// ================================ STATS HOOKS ================================
+
+export function useProcurementStats(timeRange: '7d' | '30d' | '90d' = '30d') {
+  const { data: session } = useSession()
+  
+  return useQuery({
+    queryKey: ['procurement-stats', session?.user?.sppgId, timeRange],
+    queryFn: () => {
+      if (!session?.user?.sppgId) throw new Error('No SPPG ID')
+      return getProcurementStats(session.user.sppgId, timeRange)
+    },
+    enabled: !!session?.user?.sppgId,
+    staleTime: 10 * 60 * 1000, // 10 minutes
+  })
+}
+
+// ================================ BUSINESS LOGIC FUNCTIONS ================================
+// Consolidated from ProcurementService + ProcurementRepository
+
+// PROCUREMENT OPERATIONS
+async function findProcurementsBySppgId(
+  sppgId: string,
+  options: {
+    filters?: ProcurementFilters
+    pagination?: PaginationParams
+  } = {}
+): Promise<PaginatedResult<ProcurementWithDetails>> {
+  const { filters = {}, pagination = {} } = options
+  const { page = 1, limit = 10, sortBy = 'procurementDate', sortOrder = 'desc' } = pagination
+
+  // Build where clause with multi-tenant security
+  const where = {
+    sppgId, // CRITICAL: Multi-tenant isolation
+    ...(filters.deliveryStatus && {
+      deliveryStatus: Array.isArray(filters.deliveryStatus) 
+        ? { in: filters.deliveryStatus }
+        : filters.deliveryStatus
+    }),
+    ...(filters.paymentStatus && {
+      paymentStatus: Array.isArray(filters.paymentStatus)
+        ? { in: filters.paymentStatus }
+        : filters.paymentStatus
+    }),
+    ...(filters.status && { status: filters.status }),
+    ...(filters.supplierName && {
+      supplierName: { contains: filters.supplierName, mode: 'insensitive' as const }
+    }),
+    ...(filters.supplierType && { supplierType: filters.supplierType }),
+    ...(filters.dateFrom && { procurementDate: { gte: filters.dateFrom } }),
+    ...(filters.dateTo && { procurementDate: { lte: filters.dateTo } }),
+    ...(filters.amountMin && { totalAmount: { gte: filters.amountMin } }),
+    ...(filters.amountMax && { totalAmount: { lte: filters.amountMax } }),
+    ...(filters.search && {
+      OR: [
+        { procurementCode: { contains: filters.search, mode: 'insensitive' as const } },
+        { supplierName: { contains: filters.search, mode: 'insensitive' as const } },
+        { notes: { contains: filters.search, mode: 'insensitive' as const } }
+      ]
+    })
+  }
+
+  const [procurements, total] = await Promise.all([
+    db.procurement.findMany({
+      where,
+      skip: (page - 1) * limit,
+      take: limit,
+      orderBy: { [sortBy]: sortOrder },
+      include: {
+        items: {
+          include: {
+            inventoryItem: {
+              select: {
+                id: true,
+                itemName: true,
+                currentStock: true
+              }
+            }
+          }
+        },
+        plan: {
+          select: {
+            id: true,
+            planName: true
+          }
+        }
+      }
+    }),
+    db.procurement.count({ where })
+  ])
+
+  return {
+    data: procurements as ProcurementWithDetails[],
+    pagination: {
+      page,
+      limit,
+      total,
+      pages: Math.ceil(total / limit)
+    }
+  }
+}
+
+async function findProcurementById(
+  procurementId: string,
+  sppgId: string
+): Promise<ProcurementWithDetails | null> {
+  return db.procurement.findFirst({
+    where: {
+      id: procurementId,
+      sppgId // CRITICAL: Multi-tenant isolation
+    },
+    include: {
+      items: {
+        include: {
+          inventoryItem: {
+            select: {
+              id: true,
+              itemName: true,
+              currentStock: true
+            }
+          }
+        }
+      },
+      plan: {
+        select: {
+          id: true,
+          planName: true
+        }
+      }
+    }
+  }) as Promise<ProcurementWithDetails | null>
+}
+
+async function createProcurement(
+  input: CreateProcurementInput,
+  sppgId: string
+): Promise<ServiceResult<ProcurementWithDetails>> {
+  try {
+    // 1. Validation
+    const validated = createProcurementSchema.safeParse(input)
+    if (!validated.success) {
+      return {
+        success: false,
+        errors: validated.error.flatten().fieldErrors
+      }
+    }
+
+    // 2. Generate procurement code
+    const count = await db.procurement.count({ where: { sppgId } })
+    const procurementCode = `PROC-${new Date().getFullYear()}-${String(count + 1).padStart(4, '0')}`
+
+    // 3. Create procurement with items
+    const procurement = await db.procurement.create({
+      data: {
+        ...validated.data,
+        sppgId, // CRITICAL: Multi-tenant isolation
+        procurementCode,
+        status: 'PENDING',
+        deliveryStatus: 'PENDING',
+        paymentStatus: 'UNPAID',
+        paidAmount: 0,
+        items: {
+          create: validated.data.items?.map(item => ({
+            ...item,
+            totalPrice: item.orderedQuantity * item.unitPrice,
+            receivedQuantity: 0
+          }))
+        }
+      },
+      include: {
+        items: {
+          include: {
+            inventoryItem: {
+              select: {
+                id: true,
+                itemName: true,
+                currentStock: true
+              }
+            }
+          }
+        },
+        plan: {
+          select: {
+            id: true,
+            planName: true
+          }
+        }
+      }
+    }) as ProcurementWithDetails
+
+    // 4. Update procurement totals
+    const totalAmount = procurement.items?.reduce((sum, item) => sum + item.totalPrice, 0) || 0
+    
+    const updatedProcurement = await db.procurement.update({
+      where: { id: procurement.id },
+      data: {
+        totalAmount,
+        remainingAmount: totalAmount
+      },
+      include: {
+        items: {
+          include: {
+            inventoryItem: {
+              select: {
+                id: true,
+                itemName: true,
+                currentStock: true
+              }
+            }
+          }
+        },
+        plan: {
+          select: {
+            id: true,
+            planName: true
+          }
+        }
+      }
+    }) as ProcurementWithDetails
+
+    return {
+      success: true,
+      data: updatedProcurement
+    }
+  } catch (error) {
+    console.error('Create procurement error:', error)
+    return {
+      success: false,
+      error: 'Gagal membuat pengadaan'
+    }
+  }
+}
+
+async function updateProcurement(
+  procurementId: string,
+  input: UpdateProcurementInput
+): Promise<ServiceResult<ProcurementWithDetails>> {
+  try {
+    // 1. Validation
+    const validated = updateProcurementSchema.safeParse(input)
+    if (!validated.success) {
+      return {
+        success: false,
+        errors: validated.error.flatten().fieldErrors
+      }
+    }
+
+    // 2. Update procurement
+    const procurement = await db.procurement.update({
+      where: { id: procurementId },
+      data: validated.data,
+      include: {
+        items: {
+          include: {
+            inventoryItem: {
+              select: {
+                id: true,
+                itemName: true,
+                currentStock: true
+              }
+            }
+          }
+        },
+        plan: {
+          select: {
+            id: true,
+            planName: true
+          }
+        }
+      }
+    }) as ProcurementWithDetails
+
+    return {
+      success: true,
+      data: procurement
+    }
+  } catch (error) {
+    console.error('Update procurement error:', error)
+    return {
+      success: false,
+      error: 'Gagal mengupdate pengadaan'
+    }
+  }
+}
+
+async function deleteProcurement(procurementId: string): Promise<ServiceResult<void>> {
+  try {
+    // Check if can be deleted (only pending status)
+    const procurement = await db.procurement.findUnique({
+      where: { id: procurementId },
+      select: { status: true }
+    })
+
+    if (!procurement) {
+      return {
+        success: false,
+        error: 'Pengadaan tidak ditemukan'
+      }
+    }
+
+    if (procurement.status !== 'PENDING') {
+      return {
+        success: false,
+        error: 'Hanya pengadaan dengan status PENDING yang dapat dihapus'
+      }
+    }
+
+    // Delete with cascade
+    await db.procurement.delete({
+      where: { id: procurementId }
+    })
+
+    return {
+      success: true,
+      data: undefined
+    }
+  } catch (error) {
+    console.error('Delete procurement error:', error)
+    return {
+      success: false,
+      error: 'Gagal menghapus pengadaan'
+    }
+  }
+}
+
+// PROCUREMENT PLAN OPERATIONS
+async function findProcurementPlansBySppgId(
+  sppgId: string,
+  options: {
+    filters?: { status?: string; search?: string }
+    pagination?: PaginationParams
+  } = {}
+): Promise<PaginatedResult<ProcurementPlanWithDetails>> {
+  const { filters = {}, pagination = {} } = options
+  const { page = 1, limit = 10, sortBy = 'planDate', sortOrder = 'desc' } = pagination
+
+  const where = {
+    sppgId, // CRITICAL: Multi-tenant isolation
+    ...(filters.status && { status: filters.status }),
+    ...(filters.search && {
+      OR: [
+        { planName: { contains: filters.search, mode: 'insensitive' as const } },
+        { planCode: { contains: filters.search, mode: 'insensitive' as const } },
+        { description: { contains: filters.search, mode: 'insensitive' as const } }
+      ]
+    })
+  }
+
+  const [plans, total] = await Promise.all([
+    db.procurementPlan.findMany({
+      where,
+      skip: (page - 1) * limit,
+      take: limit,
+      orderBy: { [sortBy]: sortOrder },
+      include: {
+        procurements: {
+          select: {
+            id: true,
+            procurementCode: true,
+            totalAmount: true,
+            status: true
+          }
+        },
+        _count: {
+          select: {
+            procurements: true
+          }
+        }
+      }
+    }),
+    db.procurementPlan.count({ where })
+  ])
+
+  return {
+    data: plans as ProcurementPlanWithDetails[],
+    pagination: {
+      page,
+      limit,
+      total,
+      pages: Math.ceil(total / limit)
+    }
+  }
+}
+
+async function findProcurementPlanById(
+  planId: string,
+  sppgId: string
+): Promise<ProcurementPlanWithDetails | null> {
+  return db.procurementPlan.findFirst({
+    where: {
+      id: planId,
+      sppgId // CRITICAL: Multi-tenant isolation
+    },
+    include: {
+      procurements: true,
+      _count: {
+        select: {
+          procurements: true
+        }
+      }
+    }
+  }) as Promise<ProcurementPlanWithDetails | null>
+}
+
+async function createProcurementPlan(
+  input: CreateProcurementPlanInput,
+  sppgId: string
+): Promise<ServiceResult<ProcurementPlanWithDetails>> {
+  try {
+    // 1. Validation
+    const validated = createProcurementPlanSchema.safeParse(input)
+    if (!validated.success) {
+      return {
+        success: false,
+        errors: validated.error.flatten().fieldErrors
+      }
+    }
+
+    // 2. Generate plan code
+    const count = await db.procurementPlan.count({ where: { sppgId } })
+    const planCode = `PLAN-${new Date().getFullYear()}-${String(count + 1).padStart(4, '0')}`
+
+    // 3. Create plan
+    const plan = await db.procurementPlan.create({
+      data: {
+        ...validated.data,
+        sppgId, // CRITICAL: Multi-tenant isolation
+        planCode,
+        status: 'DRAFT',
+        usedBudget: 0,
+        remainingBudget: validated.data.totalBudget
+      },
+      include: {
+        procurements: true,
+        _count: {
+          select: {
+            procurements: true
+          }
+        }
+      }
+    }) as ProcurementPlanWithDetails
+
+    return {
+      success: true,
+      data: plan
+    }
+  } catch (error) {
+    console.error('Create procurement plan error:', error)
+    return {
+      success: false,
+      error: 'Gagal membuat rencana pengadaan'
+    }
+  }
+}
+
+async function updateProcurementPlan(
+  planId: string,
+  input: UpdateProcurementPlanInput
+): Promise<ServiceResult<ProcurementPlanWithDetails>> {
+  try {
+    // 1. Validation
+    const validated = updateProcurementPlanSchema.safeParse(input)
+    if (!validated.success) {
+      return {
+        success: false,
+        errors: validated.error.flatten().fieldErrors
+      }
+    }
+
+    // 2. Update plan
+    const plan = await db.procurementPlan.update({
+      where: { id: planId },
+      data: validated.data,
+      include: {
+        procurements: true,
+        _count: {
+          select: {
+            procurements: true
+          }
+        }
+      }
+    }) as ProcurementPlanWithDetails
+
+    return {
+      success: true,
+      data: plan
+    }
+  } catch (error) {
+    console.error('Update procurement plan error:', error)
+    return {
+      success: false,
+      error: 'Gagal mengupdate rencana pengadaan'
+    }
+  }
+}
+
+// STATS OPERATIONS
+async function getProcurementStats(
+  sppgId: string,
+  timeRange: '7d' | '30d' | '90d' = '30d'
+) {
+  const days = timeRange === '7d' ? 7 : timeRange === '30d' ? 30 : 90
+  const startDate = new Date()
+  startDate.setDate(startDate.getDate() - days)
+
+  const [
+    totalProcurements,
+    totalAmount,
+    pendingCount,
+    completedCount,
+    statusBreakdown,
+    recentActivity
+  ] = await Promise.all([
+    // Total procurements
+    db.procurement.count({
+      where: {
+        sppgId,
+        procurementDate: { gte: startDate }
+      }
+    }),
+
+    // Total amount
+    db.procurement.aggregate({
+      where: {
+        sppgId,
+        procurementDate: { gte: startDate }
+      },
+      _sum: {
+        totalAmount: true
+      }
+    }),
+
+    // Pending count
+    db.procurement.count({
+      where: {
+        sppgId,
+        status: 'PENDING'
+      }
+    }),
+
+    // Completed count
+    db.procurement.count({
+      where: {
+        sppgId,
+        status: 'COMPLETED'
+      }
+    }),
+
+    // Status breakdown
+    db.procurement.groupBy({
+      by: ['deliveryStatus'],
+      where: {
+        sppgId,
+        procurementDate: { gte: startDate }
+      },
+      _count: {
+        id: true
+      }
+    }),
+
+    // Recent activity
+    db.procurement.findMany({
+      where: {
+        sppgId,
+        updatedAt: { gte: startDate }
+      },
+      select: {
+        id: true,
+        procurementCode: true,
+        supplierName: true,
+        totalAmount: true,
+        status: true,
+        updatedAt: true
+      },
+      orderBy: {
+        updatedAt: 'desc'
+      },
+      take: 10
+    })
+  ])
+
+  return {
+    totalProcurements,
+    totalAmount: totalAmount._sum.totalAmount || 0,
+    pendingCount,
+    completedCount,
+    statusBreakdown: statusBreakdown.map((item: { deliveryStatus: string; _count: { id: number } }) => ({
+      status: item.deliveryStatus,
+      count: item._count.id
+    })),
+    recentActivity: recentActivity.map((proc: { id: string; procurementCode: string; supplierName: string; totalAmount: number; status: string; updatedAt: Date }) => ({
+      id: proc.id,
+      procurementCode: proc.procurementCode,
+      supplierName: proc.supplierName,
+      totalAmount: proc.totalAmount,
+      status: proc.status,
+      updatedAt: proc.updatedAt
+    }))
+  }
+}

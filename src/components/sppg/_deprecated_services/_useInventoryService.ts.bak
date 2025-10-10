@@ -1,0 +1,1312 @@
+// Inventory Business Logic Hooks - Component-Level Implementation  
+// Consolidating InventoryService + InventoryRepository + StockCalculator + ExpiryTracker logic into React hooks
+// src/components/sppg/inventory/hooks/useInventoryService.ts
+
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import db from '@/lib/db'
+import { useSession } from 'next-auth/react'
+import type { InventoryCategory, MovementType } from '@prisma/client'
+
+// Import schemas from component utils - will be consolidated
+import {
+  createInventoryItemSchema,
+  updateInventoryItemSchema,
+  updateStockSchema,
+  stockMovementSchema
+} from '../utils/inventorySchemas'
+
+// ================================ TYPES ================================
+
+export interface ServiceResult<T> {
+  success: boolean
+  data?: T
+  error?: string
+  errors?: Record<string, string[]>
+}
+
+export interface PaginatedResult<T> {
+  data: T[]
+  pagination: {
+    page: number
+    limit: number
+    total: number
+    pages: number
+  }
+}
+
+// Define enums locally since they might not be in Prisma
+export enum StockStatus {
+  AVAILABLE = 'AVAILABLE',
+  LOW_STOCK = 'LOW_STOCK',
+  OUT_OF_STOCK = 'OUT_OF_STOCK',
+  OVERSTOCK = 'OVERSTOCK',
+  EXPIRED = 'EXPIRED'
+}
+
+// Inventory types - consolidating from domain
+export interface InventoryItemWithDetails {
+  id: string
+  sppgId: string
+  itemCode: string
+  itemName: string
+  
+  // Category & Description
+  category: InventoryCategory
+  description?: string
+  
+  // Stock Management
+  currentStock: number
+  minStock: number
+  maxStock: number
+  stockStatus: StockStatus
+  reorderPoint: number
+  
+  // Pricing & Valuation
+  unitPrice: number
+  unitCost: number
+  stockValue: number
+  
+  // Physical Properties
+  unit: string
+  weight?: number
+  volume?: number
+  
+  // Storage & Location
+  storageLocation?: string
+  storageTemperature?: number
+  storageHumidity?: number
+  
+  // Expiry & Quality
+  expiryDate?: Date
+  batchNumber?: string
+  manufacturingDate?: Date
+  
+  // Supplier & Procurement
+  supplierId?: string
+  lastProcurementDate?: Date
+  lastProcurementPrice?: number
+  
+  // Nutrition Information (for food items)
+  calories?: number
+  protein?: number
+  carbohydrates?: number
+  fat?: number
+  fiber?: number
+  
+  // Status & Tracking
+  isActive: boolean
+  
+  createdAt: Date
+  updatedAt: Date
+  
+  // Relations
+  supplier?: {
+    id: string
+    supplierName: string
+    contactPerson: string
+    phone: string
+    email?: string
+  }
+  stockMovements?: StockMovementWithDetails[]
+  
+  // Calculated Fields
+  turnoverRate?: number
+  daysOfStock?: number
+  stockRatio?: number
+}
+
+export interface StockMovementWithDetails {
+  id: string
+  inventoryItemId: string
+  
+  // Movement Details
+  type: MovementType
+  quantity: number
+  reason: string
+  
+  // Stock Levels
+  previousStock: number
+  newStock: number
+  
+  // Reference & Tracking
+  referenceId?: string
+  referenceType?: string
+  notes?: string
+  
+  // User & Timing
+  userId?: string
+  createdAt: Date
+  
+  // Relations
+  inventoryItem?: {
+    id: string
+    itemName: string
+    itemCode: string
+    unit: string
+  }
+  user?: {
+    id: string
+    fullName: string
+  }
+}
+
+export interface StockMetrics {
+  status: StockStatus
+  turnoverRate: number
+  reorderPoint: number
+  optimalStock: number
+  stockRatio: number
+  daysOfStock: number
+}
+
+export interface ExpiryAlert {
+  itemId: string
+  itemName: string
+  itemCode: string
+  expiryDate: Date
+  daysUntilExpiry: number
+  category: 'EXPIRED' | 'CRITICAL' | 'WARNING'
+  quantity: number
+  estimatedLoss: number
+}
+
+export interface InventoryDashboard {
+  totalItems: number
+  totalValue: number
+  lowStockCount: number
+  expiredCount: number
+  expiringCount: number
+  categoryBreakdown: Array<{
+    category: string
+    count: number
+    value: number
+  }>
+  topItems: Array<{
+    itemId: string
+    itemName: string
+    value: number
+    quantity: number
+  }>
+  recentMovements: StockMovementWithDetails[]
+}
+
+// Input types - using zod infer
+export type CreateInventoryItemInput = Parameters<typeof createInventoryItemSchema.parse>[0]
+export type UpdateInventoryItemInput = Parameters<typeof updateInventoryItemSchema.parse>[0]
+export type UpdateStockInput = Parameters<typeof updateStockSchema.parse>[0]
+export type StockMovementInput = Parameters<typeof stockMovementSchema.parse>[0]
+
+// Filter types
+export interface InventoryFilters {
+  category?: InventoryCategory | InventoryCategory[]
+  status?: StockStatus | StockStatus[]
+  supplierId?: string
+  location?: string
+  expiryWithin?: number // days
+  lowStock?: boolean
+  search?: string
+}
+
+export interface PaginationParams {
+  page?: number
+  limit?: number
+  sortBy?: string
+  sortOrder?: 'asc' | 'desc'
+}
+
+// ================================ INVENTORY HOOKS ================================
+
+export function useInventoryItems(options: {
+  filters?: InventoryFilters
+  pagination?: PaginationParams
+} = {}) {
+  const { data: session } = useSession()
+  
+  return useQuery({
+    queryKey: ['inventory-items', session?.user?.sppgId, options],
+    queryFn: () => {
+      if (!session?.user?.sppgId) throw new Error('No SPPG ID')
+      return findInventoryItemsBySppgId(session.user.sppgId, options)
+    },
+    enabled: !!session?.user?.sppgId,
+    staleTime: 5 * 60 * 1000, // 5 minutes - inventory changes frequently
+  })
+}
+
+export function useInventoryItem(itemId: string) {
+  const { data: session } = useSession()
+  
+  return useQuery({
+    queryKey: ['inventory-item', itemId],
+    queryFn: () => {
+      if (!session?.user?.sppgId) throw new Error('No SPPG ID')
+      return findInventoryItemById(itemId, session.user.sppgId)
+    },
+    enabled: !!itemId && !!session?.user?.sppgId,
+  })
+}
+
+export function useCreateInventoryItem() {
+  const { data: session } = useSession()
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: (input: CreateInventoryItemInput) => {
+      if (!session?.user?.sppgId) throw new Error('No SPPG ID')
+      return createInventoryItem(input, session.user.sppgId)
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['inventory-items'] })
+      queryClient.invalidateQueries({ queryKey: ['inventory-dashboard'] })
+      queryClient.invalidateQueries({ queryKey: ['inventory-stats'] })
+    },
+  })
+}
+
+export function useUpdateInventoryItem() {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ itemId, input }: { itemId: string; input: UpdateInventoryItemInput }) =>
+      updateInventoryItem(itemId, input),
+    onSuccess: (_, { itemId }) => {
+      queryClient.invalidateQueries({ queryKey: ['inventory-items'] })
+      queryClient.invalidateQueries({ queryKey: ['inventory-item', itemId] })
+      queryClient.invalidateQueries({ queryKey: ['inventory-dashboard'] })
+    },
+  })
+}
+
+export function useUpdateStock() {
+  const { data: session } = useSession()
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ itemId, input }: { itemId: string; input: UpdateStockInput }) => {
+      if (!session?.user?.id) throw new Error('No User ID')
+      return updateStock(itemId, input, session.user.id)
+    },
+    onSuccess: (_, { itemId }) => {
+      queryClient.invalidateQueries({ queryKey: ['inventory-items'] })
+      queryClient.invalidateQueries({ queryKey: ['inventory-item', itemId] })
+      queryClient.invalidateQueries({ queryKey: ['stock-movements'] })
+      queryClient.invalidateQueries({ queryKey: ['inventory-dashboard'] })
+    },
+  })
+}
+
+export function useDeleteInventoryItem() {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: (itemId: string) => deleteInventoryItem(itemId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['inventory-items'] })
+      queryClient.invalidateQueries({ queryKey: ['inventory-dashboard'] })
+    },
+  })
+}
+
+// ================================ STOCK MOVEMENT HOOKS ================================
+
+export function useStockMovements(itemId?: string) {
+  const { data: session } = useSession()
+  
+  return useQuery({
+    queryKey: ['stock-movements', session?.user?.sppgId, itemId],
+    queryFn: () => {
+      if (!session?.user?.sppgId) throw new Error('No SPPG ID')
+      return getStockMovements(session.user.sppgId, itemId)
+    },
+    enabled: !!session?.user?.sppgId,
+  })
+}
+
+export function useCreateStockMovement() {
+  const { data: session } = useSession()
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: (input: StockMovementInput) => {
+      if (!session?.user?.id) throw new Error('No User ID')
+      return createStockMovement(input, session.user.id)
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['stock-movements'] })
+      queryClient.invalidateQueries({ queryKey: ['inventory-items'] })
+      queryClient.invalidateQueries({ queryKey: ['inventory-dashboard'] })
+    },
+  })
+}
+
+// ================================ ANALYTICS & ALERTS HOOKS ================================
+
+export function useInventoryDashboard() {
+  const { data: session } = useSession()
+  
+  return useQuery({
+    queryKey: ['inventory-dashboard', session?.user?.sppgId],
+    queryFn: () => {
+      if (!session?.user?.sppgId) throw new Error('No SPPG ID')
+      return getInventoryDashboard(session.user.sppgId)
+    },
+    enabled: !!session?.user?.sppgId,
+    staleTime: 2 * 60 * 1000, // 2 minutes
+  })
+}
+
+export function useLowStockItems() {
+  const { data: session } = useSession()
+  
+  return useQuery({
+    queryKey: ['low-stock-items', session?.user?.sppgId],
+    queryFn: () => {
+      if (!session?.user?.sppgId) throw new Error('No SPPG ID')
+      return getLowStockItems(session.user.sppgId)
+    },
+    enabled: !!session?.user?.sppgId,
+    staleTime: 5 * 60 * 1000, // 5 minutes
+  })
+}
+
+export function useExpiryAlerts(days: number = 7) {
+  const { data: session } = useSession()
+  
+  return useQuery({
+    queryKey: ['expiry-alerts', session?.user?.sppgId, days],
+    queryFn: () => {
+      if (!session?.user?.sppgId) throw new Error('No SPPG ID')
+      return getExpiryAlerts(session.user.sppgId, days)
+    },
+    enabled: !!session?.user?.sppgId,
+    refetchInterval: 60 * 60 * 1000, // Refresh hourly for expiry tracking
+  })
+}
+
+export function useInventoryStats(timeRange: '7d' | '30d' | '90d' = '30d') {
+  const { data: session } = useSession()
+  
+  return useQuery({
+    queryKey: ['inventory-stats', session?.user?.sppgId, timeRange],
+    queryFn: () => {
+      if (!session?.user?.sppgId) throw new Error('No SPPG ID')
+      return getInventoryStats(session.user.sppgId, timeRange)
+    },
+    enabled: !!session?.user?.sppgId,
+    staleTime: 10 * 60 * 1000, // 10 minutes
+  })
+}
+
+// ================================ BUSINESS LOGIC FUNCTIONS ================================
+// Consolidated from InventoryService + InventoryRepository + StockCalculator + ExpiryTracker
+
+// INVENTORY OPERATIONS
+async function findInventoryItemsBySppgId(
+  sppgId: string,
+  options: {
+    filters?: InventoryFilters
+    pagination?: PaginationParams
+  } = {}
+): Promise<PaginatedResult<InventoryItemWithDetails>> {
+  const { filters = {}, pagination = {} } = options
+  const { page = 1, limit = 20, sortBy = 'itemName', sortOrder = 'asc' } = pagination
+
+  // Build where clause with multi-tenant security
+  const where = {
+    sppgId, // CRITICAL: Multi-tenant isolation
+    isActive: true,
+    ...(filters.category && {
+      category: Array.isArray(filters.category) 
+        ? { in: filters.category }
+        : filters.category
+    }),
+    ...(filters.supplierId && { supplierId: filters.supplierId }),
+    ...(filters.location && { storageLocation: { contains: filters.location, mode: 'insensitive' as const } }),
+    ...(filters.lowStock && {
+      currentStock: { lte: db.inventoryItem.fields.minStock }
+    }),
+    ...(filters.expiryWithin && {
+      expiryDate: {
+        lte: new Date(Date.now() + filters.expiryWithin * 24 * 60 * 60 * 1000)
+      }
+    }),
+    ...(filters.search && {
+      OR: [
+        { itemName: { contains: filters.search, mode: 'insensitive' as const } },
+        { itemCode: { contains: filters.search, mode: 'insensitive' as const } },
+        { description: { contains: filters.search, mode: 'insensitive' as const } }
+      ]
+    })
+  }
+
+  const [items, total] = await Promise.all([
+    db.inventoryItem.findMany({
+      where,
+      skip: (page - 1) * limit,
+      take: limit,
+      orderBy: { [sortBy]: sortOrder },
+      include: {
+        supplier: {
+          select: {
+            id: true,
+            supplierName: true,
+            contactPerson: true,
+            phone: true,
+            email: true
+          }
+        }
+      }
+    }),
+    db.inventoryItem.count({ where })
+  ])
+
+  // Calculate stock metrics for each item
+  const itemsWithMetrics = items.map(item => ({
+    ...item,
+    stockStatus: determineStockStatus(item.currentStock, item.minStock, item.maxStock),
+    stockRatio: item.maxStock > 0 ? item.currentStock / item.maxStock : 0,
+    reorderPoint: calculateReorderPoint(item.minStock),
+    turnoverRate: calculateTurnoverRate(item.currentStock, item.minStock),
+    daysOfStock: calculateDaysOfStock(item.currentStock, item.minStock)
+  })) as InventoryItemWithDetails[]
+
+  return {
+    data: itemsWithMetrics,
+    pagination: {
+      page,
+      limit,
+      total,
+      pages: Math.ceil(total / limit)
+    }
+  }
+}
+
+async function findInventoryItemById(
+  itemId: string,
+  sppgId: string
+): Promise<InventoryItemWithDetails | null> {
+  const item = await db.inventoryItem.findFirst({
+    where: {
+      id: itemId,
+      sppgId // CRITICAL: Multi-tenant isolation
+    },
+    include: {
+      supplier: {
+        select: {
+          id: true,
+          supplierName: true,
+          contactPerson: true,
+          phone: true,
+          email: true
+        }
+      },
+      stockMovements: {
+        include: {
+          user: {
+            select: {
+              id: true,
+              fullName: true
+            }
+          }
+        },
+        orderBy: {
+          createdAt: 'desc'
+        },
+        take: 20 // Latest 20 movements
+      }
+    }
+  })
+
+  if (!item) return null
+
+  return {
+    ...item,
+    stockStatus: determineStockStatus(item.currentStock, item.minStock, item.maxStock),
+    stockRatio: item.maxStock > 0 ? item.currentStock / item.maxStock : 0,
+    reorderPoint: calculateReorderPoint(item.minStock),
+    turnoverRate: calculateTurnoverRate(item.currentStock, item.minStock),
+    daysOfStock: calculateDaysOfStock(item.currentStock, item.minStock)
+  } as InventoryItemWithDetails
+}
+
+async function createInventoryItem(
+  input: CreateInventoryItemInput,
+  sppgId: string
+): Promise<ServiceResult<InventoryItemWithDetails>> {
+  try {
+    // 1. Validation
+    const validated = createInventoryItemSchema.safeParse(input)
+    if (!validated.success) {
+      return {
+        success: false,
+        errors: validated.error.flatten().fieldErrors
+      }
+    }
+
+    // 2. Check for duplicate item code
+    const existing = await db.inventoryItem.findFirst({
+      where: {
+        itemCode: validated.data.itemCode,
+        sppgId
+      }
+    })
+
+    if (existing) {
+      return {
+        success: false,
+        error: 'Item dengan kode ini sudah ada'
+      }
+    }
+
+    // 3. Calculate initial metrics
+    const stockMetrics = calculateStockMetrics(
+      validated.data.currentStock,
+      validated.data.minStock,
+      validated.data.maxStock
+    )
+
+    // 4. Calculate stock value
+    const stockValue = validated.data.currentStock * validated.data.unitCost
+
+    // 5. Create item
+    const item = await db.inventoryItem.create({
+      data: {
+        ...validated.data,
+        sppgId, // CRITICAL: Multi-tenant isolation
+        stockValue,
+        reorderPoint: stockMetrics.reorderPoint
+      },
+      include: {
+        supplier: {
+          select: {
+            id: true,
+            supplierName: true,
+            contactPerson: true,
+            phone: true,
+            email: true
+          }
+        }
+      }
+    })
+
+    // 6. Create initial stock movement
+    await db.stockMovement.create({
+      data: {
+        inventoryItemId: item.id,
+        type: 'IN',
+        quantity: validated.data.currentStock,
+        reason: 'Initial stock entry',
+        previousStock: 0,
+        newStock: validated.data.currentStock,
+        userId: 'system' // TODO: Get from session
+      }
+    })
+
+    return {
+      success: true,
+      data: {
+        ...item,
+        stockStatus: stockMetrics.status,
+        stockRatio: stockMetrics.stockRatio,
+        reorderPoint: stockMetrics.reorderPoint,
+        turnoverRate: stockMetrics.turnoverRate,
+        daysOfStock: stockMetrics.daysOfStock
+      } as InventoryItemWithDetails
+    }
+  } catch (error) {
+    console.error('Create inventory item error:', error)
+    return {
+      success: false,
+      error: 'Gagal membuat item inventory'
+    }
+  }
+}
+
+async function updateInventoryItem(
+  itemId: string,
+  input: UpdateInventoryItemInput
+): Promise<ServiceResult<InventoryItemWithDetails>> {
+  try {
+    // 1. Validation
+    const validated = updateInventoryItemSchema.safeParse(input)
+    if (!validated.success) {
+      return {
+        success: false,
+        errors: validated.error.flatten().fieldErrors
+      }
+    }
+
+    // 2. Check item exists
+    const existingItem = await db.inventoryItem.findUnique({
+      where: { id: itemId }
+    })
+
+    if (!existingItem) {
+      return {
+        success: false,
+        error: 'Item tidak ditemukan'
+      }
+    }
+
+    // 3. Update item
+    const updated = await db.inventoryItem.update({
+      where: { id: itemId },
+      data: {
+        ...validated.data,
+        updatedAt: new Date()
+      },
+      include: {
+        supplier: {
+          select: {
+            id: true,
+            supplierName: true,
+            contactPerson: true,
+            phone: true,
+            email: true
+          }
+        }
+      }
+    })
+
+    // 4. Calculate updated metrics
+    const stockMetrics = calculateStockMetrics(
+      updated.currentStock,
+      updated.minStock,
+      updated.maxStock
+    )
+
+    return {
+      success: true,
+      data: {
+        ...updated,
+        stockStatus: stockMetrics.status,
+        stockRatio: stockMetrics.stockRatio,
+        reorderPoint: stockMetrics.reorderPoint,
+        turnoverRate: stockMetrics.turnoverRate,
+        daysOfStock: stockMetrics.daysOfStock
+      } as InventoryItemWithDetails
+    }
+  } catch (error) {
+    console.error('Update inventory item error:', error)
+    return {
+      success: false,
+      error: 'Gagal mengupdate item inventory'
+    }
+  }
+}
+
+async function updateStock(
+  itemId: string,
+  input: UpdateStockInput,
+  userId: string
+): Promise<ServiceResult<InventoryItemWithDetails>> {
+  try {
+    // 1. Validation
+    const validated = updateStockSchema.safeParse(input)
+    if (!validated.success) {
+      return {
+        success: false,
+        errors: validated.error.flatten().fieldErrors
+      }
+    }
+
+    // 2. Get current item
+    const item = await db.inventoryItem.findUnique({
+      where: { id: itemId }
+    })
+
+    if (!item) {
+      return {
+        success: false,
+        error: 'Item tidak ditemukan'
+      }
+    }
+
+    // 3. Calculate new stock
+    const newStock = validated.data.type === 'IN' 
+      ? item.currentStock + validated.data.quantity 
+      : item.currentStock - validated.data.quantity
+
+    if (newStock < 0) {
+      return {
+        success: false,
+        error: 'Stok tidak mencukupi untuk pengeluaran ini'
+      }
+    }
+
+    // 4. Update stock using transaction
+    const result = await db.$transaction(async (tx) => {
+      // Update inventory item
+      const updatedItem = await tx.inventoryItem.update({
+        where: { id: itemId },
+        data: {
+          currentStock: newStock,
+          stockValue: newStock * item.unitCost,
+          updatedAt: new Date()
+        },
+        include: {
+          supplier: {
+            select: {
+              id: true,
+              supplierName: true,
+              contactPerson: true,
+              phone: true,
+              email: true
+            }
+          }
+        }
+      })
+
+      // Create stock movement
+      await tx.stockMovement.create({
+        data: {
+          inventoryItemId: itemId,
+          type: validated.data.type,
+          quantity: validated.data.quantity,
+          reason: validated.data.reason,
+          notes: validated.data.notes,
+          previousStock: item.currentStock,
+          newStock,
+          userId
+        }
+      })
+
+      return updatedItem
+    })
+
+    // 5. Calculate updated metrics
+    const stockMetrics = calculateStockMetrics(
+      result.currentStock,
+      result.minStock,
+      result.maxStock
+    )
+
+    return {
+      success: true,
+      data: {
+        ...result,
+        stockStatus: stockMetrics.status,
+        stockRatio: stockMetrics.stockRatio,
+        reorderPoint: stockMetrics.reorderPoint,
+        turnoverRate: stockMetrics.turnoverRate,
+        daysOfStock: stockMetrics.daysOfStock
+      } as InventoryItemWithDetails
+    }
+  } catch (error) {
+    console.error('Update stock error:', error)
+    return {
+      success: false,
+      error: 'Gagal mengupdate stok'
+    }
+  }
+}
+
+async function deleteInventoryItem(itemId: string): Promise<ServiceResult<void>> {
+  try {
+    // Check if item has any stock movements or is referenced elsewhere
+    const [movementCount, menuIngredientCount] = await Promise.all([
+      db.stockMovement.count({ where: { inventoryItemId: itemId } }),
+      db.menuIngredient.count({ where: { inventoryItemId: itemId } })
+    ])
+
+    if (movementCount > 0 || menuIngredientCount > 0) {
+      // Soft delete instead of hard delete
+      await db.inventoryItem.update({
+        where: { id: itemId },
+        data: { isActive: false }
+      })
+    } else {
+      // Hard delete if no references
+      await db.inventoryItem.delete({
+        where: { id: itemId }
+      })
+    }
+
+    return {
+      success: true,
+      data: undefined
+    }
+  } catch (error) {
+    console.error('Delete inventory item error:', error)
+    return {
+      success: false,
+      error: 'Gagal menghapus item inventory'
+    }
+  }
+}
+
+// ================================ STOCK MOVEMENT OPERATIONS ================================
+
+async function getStockMovements(
+  sppgId: string,
+  itemId?: string
+): Promise<StockMovementWithDetails[]> {
+  const movements = await db.stockMovement.findMany({
+    where: {
+      inventoryItem: {
+        sppgId // CRITICAL: Multi-tenant isolation through relation
+      },
+      ...(itemId && { inventoryItemId: itemId })
+    },
+    include: {
+      inventoryItem: {
+        select: {
+          id: true,
+          itemName: true,
+          itemCode: true,
+          unit: true
+        }
+      },
+      user: {
+        select: {
+          id: true,
+          fullName: true
+        }
+      }
+    },
+    orderBy: {
+      createdAt: 'desc'
+    },
+    take: 100 // Limit to prevent large queries
+  })
+
+  return movements as StockMovementWithDetails[]
+}
+
+async function createStockMovement(
+  input: StockMovementInput,
+  userId: string
+): Promise<ServiceResult<StockMovementWithDetails>> {
+  try {
+    // 1. Validation
+    const validated = stockMovementSchema.safeParse(input)
+    if (!validated.success) {
+      return {
+        success: false,
+        errors: validated.error.flatten().fieldErrors
+      }
+    }
+
+    // 2. Get current item stock
+    const item = await db.inventoryItem.findUnique({
+      where: { id: validated.data.inventoryItemId },
+      select: { currentStock: true, unitCost: true }
+    })
+
+    if (!item) {
+      return {
+        success: false,
+        error: 'Item tidak ditemukan'
+      }
+    }
+
+    // 3. Calculate new stock based on movement type
+    let newStock = item.currentStock
+    
+    switch (validated.data.type) {
+      case 'IN':
+        newStock += validated.data.quantity
+        break
+      case 'OUT':
+      case 'EXPIRED':
+      case 'DAMAGED':
+        newStock -= validated.data.quantity
+        break
+      case 'ADJUSTMENT':
+        newStock = validated.data.quantity // Direct set for adjustment
+        break
+    }
+
+    if (newStock < 0 && validated.data.type !== 'ADJUSTMENT') {
+      return {
+        success: false,
+        error: 'Stok tidak mencukupi untuk pergerakan ini'
+      }
+    }
+
+    // 4. Create movement using transaction
+    const result = await db.$transaction(async (tx) => {
+      // Update item stock
+      await tx.inventoryItem.update({
+        where: { id: validated.data.inventoryItemId },
+        data: {
+          currentStock: newStock,
+          stockValue: newStock * item.unitCost,
+          updatedAt: new Date()
+        }
+      })
+
+      // Create movement record
+      const movement = await tx.stockMovement.create({
+        data: {
+          ...validated.data,
+          previousStock: item.currentStock,
+          newStock,
+          userId
+        },
+        include: {
+          inventoryItem: {
+            select: {
+              id: true,
+              itemName: true,
+              itemCode: true,
+              unit: true
+            }
+          },
+          user: {
+            select: {
+              id: true,
+              fullName: true
+            }
+          }
+        }
+      })
+
+      return movement
+    })
+
+    return {
+      success: true,
+      data: result as StockMovementWithDetails
+    }
+  } catch (error) {
+    console.error('Create stock movement error:', error)
+    return {
+      success: false,
+      error: 'Gagal membuat pergerakan stok'
+    }
+  }
+}
+
+// ================================ ANALYTICS & DASHBOARD OPERATIONS ================================
+
+async function getInventoryDashboard(sppgId: string): Promise<InventoryDashboard> {
+  const [
+    totalItems,
+    totalValue,
+    lowStockItems,
+    expiredItems,
+    expiringItems,
+    categoryStats,
+    topValueItems,
+    recentMovements
+  ] = await Promise.all([
+    // Total active items
+    db.inventoryItem.count({
+      where: { sppgId, isActive: true }
+    }),
+
+    // Total inventory value
+    db.inventoryItem.aggregate({
+      where: { sppgId, isActive: true },
+      _sum: { stockValue: true }
+    }),
+
+    // Low stock count
+    db.inventoryItem.count({
+      where: {
+        sppgId,
+        isActive: true,
+        currentStock: { lte: db.inventoryItem.fields.minStock }
+      }
+    }),
+
+    // Expired items count
+    db.inventoryItem.count({
+      where: {
+        sppgId,
+        isActive: true,
+        expiryDate: { lt: new Date() }
+      }
+    }),
+
+    // Expiring within 7 days
+    db.inventoryItem.count({
+      where: {
+        sppgId,
+        isActive: true,
+        expiryDate: {
+          gte: new Date(),
+          lte: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
+        }
+      }
+    }),
+
+    // Category breakdown
+    db.inventoryItem.groupBy({
+      by: ['category'],
+      where: { sppgId, isActive: true },
+      _count: { id: true },
+      _sum: { stockValue: true }
+    }),
+
+    // Top items by value
+    db.inventoryItem.findMany({
+      where: { sppgId, isActive: true },
+      select: {
+        id: true,
+        itemName: true,
+        stockValue: true,
+        currentStock: true
+      },
+      orderBy: { stockValue: 'desc' },
+      take: 10
+    }),
+
+    // Recent movements
+    db.stockMovement.findMany({
+      where: {
+        inventoryItem: { sppgId }
+      },
+      include: {
+        inventoryItem: {
+          select: {
+            id: true,
+            itemName: true,
+            itemCode: true,
+            unit: true
+          }
+        },
+        user: {
+          select: {
+            id: true,
+            fullName: true
+          }
+        }
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 10
+    })
+  ])
+
+  return {
+    totalItems,
+    totalValue: totalValue._sum.stockValue || 0,
+    lowStockCount: lowStockItems,
+    expiredCount: expiredItems,
+    expiringCount: expiringItems,
+    categoryBreakdown: categoryStats.map((stat: { category: string; _count: { id: number }; _sum: { stockValue: number | null } }) => ({
+      category: stat.category,
+      count: stat._count.id,
+      value: stat._sum.stockValue || 0
+    })),
+    topItems: topValueItems.map(item => ({
+      itemId: item.id,
+      itemName: item.itemName,
+      value: item.stockValue,
+      quantity: item.currentStock
+    })),
+    recentMovements: recentMovements as StockMovementWithDetails[]
+  }
+}
+
+async function getLowStockItems(sppgId: string): Promise<InventoryItemWithDetails[]> {
+  // Use raw query for comparing fields since Prisma doesn't support field comparison
+  const items = await db.$queryRaw<Array<Record<string, unknown>>>`
+    SELECT * FROM "InventoryItem" 
+    WHERE "sppgId" = ${sppgId} 
+    AND "isActive" = true
+    AND "currentStock" <= "minStock"
+    ORDER BY ("currentStock"::float / "minStock"::float) ASC
+  `
+
+  return items.map(item => ({
+    ...item,
+    stockStatus: determineStockStatus(
+      Number(item.currentStock),
+      Number(item.minStock),
+      Number(item.maxStock)
+    ),
+    stockRatio: Number(item.maxStock) > 0 ? Number(item.currentStock) / Number(item.maxStock) : 0,
+    reorderPoint: calculateReorderPoint(Number(item.minStock)),
+    turnoverRate: calculateTurnoverRate(Number(item.currentStock), Number(item.minStock)),
+    daysOfStock: calculateDaysOfStock(Number(item.currentStock), Number(item.minStock))
+  })) as InventoryItemWithDetails[]
+}
+
+async function getExpiryAlerts(sppgId: string, days: number = 7): Promise<ExpiryAlert[]> {
+  const items = await db.inventoryItem.findMany({
+    where: {
+      sppgId,
+      isActive: true,
+      expiryDate: {
+        lte: new Date(Date.now() + days * 24 * 60 * 60 * 1000)
+      }
+    },
+    select: {
+      id: true,
+      itemName: true,
+      itemCode: true,
+      expiryDate: true,
+      currentStock: true,
+      unitCost: true
+    }
+  })
+
+  return items
+    .filter(item => item.expiryDate)
+    .map(item => {
+      const daysUntilExpiry = calculateDaysUntilExpiry(item.expiryDate!)
+      return {
+        itemId: item.id,
+        itemName: item.itemName,
+        itemCode: item.itemCode,
+        expiryDate: item.expiryDate!,
+        daysUntilExpiry,
+        category: categorizeExpiryAlert(daysUntilExpiry),
+        quantity: item.currentStock,
+        estimatedLoss: item.currentStock * item.unitCost
+      }
+    })
+    .sort((a, b) => a.daysUntilExpiry - b.daysUntilExpiry)
+}
+
+async function getInventoryStats(sppgId: string, timeRange: '7d' | '30d' | '90d' = '30d') {
+  const days = timeRange === '7d' ? 7 : timeRange === '30d' ? 30 : 90
+  const startDate = new Date()
+  startDate.setDate(startDate.getDate() - days)
+
+  const [
+    movementStats,
+    stockTurnover,
+    categoryPerformance,
+    costAnalysis
+  ] = await Promise.all([
+    // Movement statistics
+    db.stockMovement.groupBy({
+      by: ['type'],
+      where: {
+        inventoryItem: { sppgId },
+        createdAt: { gte: startDate }
+      },
+      _sum: { quantity: true },
+      _count: { id: true }
+    }),
+
+    // Stock turnover analysis
+    db.inventoryItem.aggregate({
+      where: { sppgId, isActive: true },
+      _avg: { currentStock: true }
+    }),
+
+    // Category performance
+    db.inventoryItem.groupBy({
+      by: ['category'],
+      where: { sppgId, isActive: true },
+      _sum: { stockValue: true },
+      _avg: { currentStock: true }
+    }),
+
+    // Cost analysis
+    db.stockMovement.aggregate({
+      where: {
+        inventoryItem: { sppgId },
+        type: { in: ['EXPIRED', 'DAMAGED'] },
+        createdAt: { gte: startDate }
+      },
+      _sum: { quantity: true }
+    })
+  ])
+
+  return {
+    movementStats: movementStats.map((stat: { type: string; _sum: { quantity: number | null }; _count: { id: number } }) => ({
+      type: stat.type,
+      totalQuantity: stat._sum.quantity || 0,
+      count: stat._count.id
+    })),
+    averageStockLevel: stockTurnover._avg.currentStock || 0,
+    categoryPerformance: categoryPerformance.map((perf: { category: string; _sum: { stockValue: number | null }; _avg: { currentStock: number | null } }) => ({
+      category: perf.category,
+      totalValue: perf._sum.stockValue || 0,
+      averageStock: perf._avg.currentStock || 0
+    })),
+    wasteMetrics: {
+      expiredQuantity: costAnalysis._sum.quantity || 0,
+      // Additional waste calculations would go here
+    }
+  }
+}
+
+// ================================ CALCULATION HELPERS ================================
+// Consolidated from StockCalculator
+
+function calculateStockMetrics(
+  currentStock: number,
+  minStock: number,
+  maxStock: number
+): StockMetrics {
+  const status = determineStockStatus(currentStock, minStock, maxStock)
+  const turnoverRate = calculateTurnoverRate(currentStock, minStock)
+  const reorderPoint = calculateReorderPoint(minStock)
+  const optimalStock = calculateOptimalStock(minStock, maxStock)
+  
+  return {
+    status,
+    turnoverRate,
+    reorderPoint,
+    optimalStock,
+    stockRatio: maxStock > 0 ? currentStock / maxStock : 0,
+    daysOfStock: calculateDaysOfStock(currentStock, minStock)
+  }
+}
+
+function determineStockStatus(
+  currentStock: number,
+  minStock: number,
+  maxStock: number
+): StockStatus {
+  if (currentStock <= 0) {
+    return StockStatus.OUT_OF_STOCK
+  } else if (currentStock <= minStock) {
+    return StockStatus.LOW_STOCK
+  } else if (currentStock >= maxStock) {
+    return StockStatus.OVERSTOCK
+  } else {
+    return StockStatus.AVAILABLE
+  }
+}
+
+function calculateTurnoverRate(currentStock: number, minStock: number): number {
+  // Simple turnover calculation - can be enhanced with historical data
+  const averageUsage = minStock * 0.1 // Assume 10% of min stock used daily
+  return currentStock > 0 ? averageUsage / currentStock : 0
+}
+
+function calculateReorderPoint(minStock: number): number {
+  // Reorder when stock reaches 120% of minimum to account for lead time
+  return Math.ceil(minStock * 1.2)
+}
+
+function calculateOptimalStock(minStock: number, maxStock: number): number {
+  // Optimal stock is typically 70% of maximum capacity
+  return Math.ceil((minStock + maxStock) * 0.7)
+}
+
+function calculateDaysOfStock(currentStock: number, minStock: number): number {
+  const dailyUsage = minStock * 0.1 // Assume 10% of min stock used daily
+  return dailyUsage > 0 ? Math.floor(currentStock / dailyUsage) : 0
+}
+
+// ================================ EXPIRY TRACKING HELPERS ================================
+// Consolidated from ExpiryTracker
+
+function calculateDaysUntilExpiry(expiryDate: Date): number {
+  const today = new Date()
+  today.setHours(0, 0, 0, 0) // Reset time to start of day
+  
+  const expiry = new Date(expiryDate)
+  expiry.setHours(0, 0, 0, 0)
+  
+  const timeDiff = expiry.getTime() - today.getTime()
+  return Math.ceil(timeDiff / (1000 * 60 * 60 * 24))
+}
+
+function categorizeExpiryAlert(daysUntilExpiry: number): 'EXPIRED' | 'CRITICAL' | 'WARNING' {
+  if (daysUntilExpiry < 0) {
+    return 'EXPIRED'
+  } else if (daysUntilExpiry <= 3) {
+    return 'CRITICAL'
+  } else {
+    return 'WARNING'
+  }
+}
