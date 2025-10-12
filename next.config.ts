@@ -49,6 +49,7 @@ const nextConfig: NextConfig = {
       config.externals = config.externals || [];
       config.externals.push('ioredis', 'bcrypt', 'bcryptjs');
     }
+
     return config;
   }
 };
