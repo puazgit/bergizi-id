@@ -2,35 +2,33 @@
 // src/app/not-found.tsx
 
 import Link from 'next/link'
-import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 
 export default function NotFound() {
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-background via-muted/30 to-background">
-      <Card className="w-full max-w-md mx-4">
-        <CardHeader className="text-center">
-          <div className="text-6xl font-bold text-muted-foreground mb-4">404</div>
-          <CardTitle className="text-2xl">Halaman Tidak Ditemukan</CardTitle>
-        </CardHeader>
-        <CardContent className="text-center space-y-4">
-          <p className="text-muted-foreground">
+    <div className="min-h-screen flex items-center justify-center p-4" style={{ background: 'linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%)' }}>
+      <div className="w-full max-w-md bg-white rounded-lg shadow-lg border p-6">
+        <div className="text-center">
+          <div className="text-6xl font-bold text-gray-500 mb-4">404</div>
+          <h1 className="text-2xl font-bold text-gray-900 mb-4">Halaman Tidak Ditemukan</h1>
+          <p className="text-gray-600 mb-6">
             Maaf, halaman yang Anda cari tidak dapat ditemukan.
           </p>
           <div className="flex flex-col sm:flex-row gap-2 justify-center">
-            <Button asChild>
-              <Link href="/">
-                Kembali ke Beranda
-              </Link>
-            </Button>
-            <Button variant="outline" asChild>
-              <Link href="/dashboard">
-                Ke Dashboard
-              </Link>
-            </Button>
+            <Link 
+              href="/"
+              className="inline-flex items-center justify-center px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors"
+            >
+              Kembali ke Beranda
+            </Link>
+            <Link 
+              href="/dashboard"
+              className="inline-flex items-center justify-center px-4 py-2 border border-gray-300 text-gray-700 rounded-md hover:bg-gray-50 transition-colors"
+            >
+              Ke Dashboard
+            </Link>
           </div>
-        </CardContent>
-      </Card>
+        </div>
+      </div>
     </div>
   )
 }

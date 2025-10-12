@@ -8,7 +8,9 @@ const nextConfig: NextConfig = {
   eslint: {
     ignoreDuringBuilds: true,
   },
-  serverExternalPackages: ['ioredis', 'bcrypt', 'bcryptjs'],
+  serverExternalPackages: ['ioredis', 'bcrypt', 'bcryptjs', 'html2canvas'],
+  // Disable static exports for pages with Html issues
+  trailingSlash: false,
   images: {
     remotePatterns: [
       {
@@ -47,7 +49,7 @@ const nextConfig: NextConfig = {
       
       // Additional externals for client-side
       config.externals = config.externals || [];
-      config.externals.push('ioredis', 'bcrypt', 'bcryptjs');
+      config.externals.push('ioredis', 'bcrypt', 'bcryptjs', 'html2canvas');
     }
 
     return config;
