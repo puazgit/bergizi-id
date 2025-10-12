@@ -23,15 +23,16 @@ export const MenuFilters = () => null
 
 // Program management components
 export { ProgramCard } from './ProgramCard'
-export { ProgramList, ProgramListWithStats } from './ProgramList'
+export { ProgramList } from './ProgramList'
+export { ProgramDashboard } from './ProgramDashboard'
+export { ProgramListWithStats } from './ProgramListWithStats'
 export { ProgramForm } from './ProgramForm'
 
 // Program statistics & analytics
 export { 
   ProgramStats,
   ProgramTypeDistribution,
-  ProgramTargetDistribution,
-  ProgramDashboard
+  ProgramTargetDistribution
 } from './ProgramStats'
 
 // ============================================================================
