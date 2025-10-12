@@ -41,3 +41,9 @@ yarn-error.log*
 next-env.d.ts
 
 /src/generated/prisma
+
+# Docker volumes - should not be committed
+docker/volumes/
+
+# Security report
+security-report.txt

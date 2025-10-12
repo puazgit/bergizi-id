@@ -189,7 +189,7 @@ export async function seedNutritionPrograms(prisma: PrismaClient) {
     for (const program of sppgPrograms) {
       for (const menuData of sampleMenus) {
         try {
-          await prisma.nutritionMenu.create({
+          const menu = await prisma.nutritionMenu.create({
             data: {
               programId: program.id,
               menuName: menuData.name,
@@ -197,13 +197,6 @@ export async function seedNutritionPrograms(prisma: PrismaClient) {
               mealType: menuData.mealType,
               description: menuData.description,
               servingSize: menuData.servingSize,
-              
-              // Nutritional content
-              calories: menuData.calories,
-              protein: menuData.protein,
-              carbohydrates: menuData.carbohydrates,
-              fat: menuData.fat,
-              fiber: menuData.fiber,
               
               // Cost
               costPerServing: menuData.costPerServing,
@@ -221,6 +214,27 @@ export async function seedNutritionPrograms(prisma: PrismaClient) {
               isActive: true
             }
           })
+
+          // Create separate nutrition calculation
+          await prisma.menuNutritionCalculation.create({
+            data: {
+              menuId: menu.id,
+              totalCalories: menuData.calories,
+              totalProtein: menuData.protein,
+              totalCarbs: menuData.carbohydrates,
+              totalFat: menuData.fat,
+              totalFiber: menuData.fiber,
+              
+              // Calculate basic percentage (assuming 2000 kcal daily needs)
+              caloriesDV: (menuData.calories / 2000) * 100,
+              proteinDV: (menuData.protein / 50) * 100,
+              carbsDV: (menuData.carbohydrates / 300) * 100,
+              fatDV: (menuData.fat / 65) * 100,
+              fiberDV: (menuData.fiber / 25) * 100
+            }
+          })
+
+          console.log(`    ✓ Created menu: ${menuData.name} with nutrition data`)
         } catch (error) {
           console.error(`  ✗ Error creating menu ${menuData.name} for program ${program.name}:`, error)
         }
