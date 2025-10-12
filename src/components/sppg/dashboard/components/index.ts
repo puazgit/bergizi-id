@@ -18,6 +18,7 @@ export { default as DashboardClient, EnterpriseDashboardClient } from './Dashboa
 
 // Enterprise UI controls and advanced features (NEW)
 export { DashboardControlPanel } from './DashboardControlPanel'
+export { SSEConnectionStatus } from './SSEConnectionStatus'
 export { AdvancedMetricsDisplay } from './AdvancedMetricsDisplay'
 // RealtimeStatus removed - infrastructure status handled at global level
 export { EnterpriseDashboardHistoryViewer } from './EnterpriseDashboardHistoryViewer'

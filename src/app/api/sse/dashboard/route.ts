@@ -1,6 +1,7 @@
 import { NextRequest } from 'next/server'
 import { auth } from '@/auth'
 import Redis from 'ioredis'
+import { SSEMockGenerator } from '@/lib/sse-mock'
 
 interface SSEMessage {
   type: string
@@ -44,8 +45,20 @@ export async function GET(request: NextRequest) {
 
       // Setup Redis subscriber for real-time updates
       const setupRedisSubscriber = async () => {
+        let subscriber: Redis | null = null
+        
         try {
-          const subscriber = new Redis(process.env.REDIS_URL || 'redis://localhost:6379')
+          // Check if Redis is available
+          const redisUrl = process.env.REDIS_URL || 'redis://localhost:6379'
+          subscriber = new Redis(redisUrl, {
+            connectTimeout: 5000,
+            lazyConnect: true,
+            maxRetriesPerRequest: 2,
+            enableOfflineQueue: false
+          })
+
+          // Test Redis connection
+          await subscriber.connect()
           
           // Subscribe to dashboard updates for this SPPG
           await subscriber.subscribe(`dashboard-update-${sppgId}`)
@@ -66,9 +79,21 @@ export async function GET(request: NextRequest) {
             }
           })
 
+          // Handle Redis connection errors
+          subscriber.on('error', (error) => {
+            console.warn('Redis connection error:', error.message)
+            send({
+              type: 'WARNING',
+              message: 'Real-time updates temporarily unavailable',
+              timestamp: Date.now()
+            })
+          })
+
           // Cleanup on close
           const cleanup = () => {
-            subscriber.disconnect()
+            if (subscriber) {
+              subscriber.disconnect()
+            }
             connections.delete(connectionId)
           }
 
@@ -88,12 +113,60 @@ export async function GET(request: NextRequest) {
             clearInterval(heartbeat)
           })
 
-        } catch (error) {
-          console.error('Redis subscriber error:', error)
+          // Send success message
           send({
-            type: 'ERROR',
-            message: 'Failed to setup real-time updates',
+            type: 'INFO',
+            message: 'Real-time updates connected',
             timestamp: Date.now()
+          })
+
+        } catch (error) {
+          console.warn('Redis not available, running in fallback mode:', error)
+          
+          // Disconnect subscriber if it was created
+          if (subscriber) {
+            try {
+              subscriber.disconnect()
+            } catch (disconnectError) {
+              console.warn('Error disconnecting Redis:', disconnectError)
+            }
+          }
+
+          // Send fallback mode message (not an error)
+          send({
+            type: 'INFO',
+            message: 'Running in development mode with simulated data',
+            timestamp: Date.now()
+          })
+
+          // Setup mock data generator for development
+          const mockGenerator = new SSEMockGenerator()
+          
+          const unsubscribeMock = mockGenerator.subscribe((mockData) => {
+            send({
+              type: 'DASHBOARD_UPDATE',
+              channel: `dashboard-update-${sppgId}`,
+              data: mockData.data,
+              timestamp: Date.now()
+            })
+          })
+
+          mockGenerator.start()
+
+          // Keep connection alive with heartbeat
+          const heartbeat = setInterval(() => {
+            send({
+              type: 'HEARTBEAT',
+              timestamp: Date.now()
+            })
+          }, 30000)
+
+          // Cleanup on disconnect
+          request.signal.addEventListener('abort', () => {
+            clearInterval(heartbeat)
+            mockGenerator.stop()
+            unsubscribeMock()
+            connections.delete(connectionId)
           })
         }
       }

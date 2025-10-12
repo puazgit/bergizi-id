@@ -153,10 +153,34 @@ export function useDashboardSSE({
               }
               break
 
+            case 'INFO':
+              console.info('ℹ️ SSE info:', message.message)
+              // Clear any previous errors
+              setConnectionError(null)
+              if (message.message?.includes('fallback mode')) {
+                toast.info('Dashboard Notice', {
+                  description: message.message,
+                  duration: 5000
+                })
+              }
+              break
+
+            case 'WARNING':
+              console.warn('⚠️ SSE warning:', message.message)
+              toast.warning('Connection Warning', {
+                description: message.message || 'Connection issue detected',
+                duration: 7000
+              })
+              break
+
             case 'ERROR':
               console.error('❌ SSE server error:', message.message)
               setConnectionError(message.message || 'Server error')
               onError?.(message.message || 'Server error')
+              toast.error('Connection Error', {
+                description: message.message || 'Server error',
+                duration: 10000
+              })
               break
           }
 
