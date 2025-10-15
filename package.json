@@ -33,6 +33,8 @@
     "cache:clear": "tsx scripts/clear-cache.ts",
     "deploy:validate": "./scripts/validate-deployment.sh",
     "deploy:check": "npm run deploy:validate && npm run build",
+    "deploy:coolify": "./scripts/validate-coolify.sh",
+    "deploy:coolify-check": "npm run deploy:coolify && npm run build",
     "prepare": "husky install"
   },
   "dependencies": {

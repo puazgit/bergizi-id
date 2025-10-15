@@ -1,0 +1,87 @@
+# Dockerignore for Coolify Deployment
+# Optimize build performance by excluding unnecessary files
+
+# Dependencies
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Next.js build output (will be generated)
+.next/
+out/
+
+# Development files
+.env.local
+.env.development
+.env.test
+
+# Git and version control
+.git/
+.gitignore
+.gitmodules
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Testing
+coverage/
+.jest/
+*.test.js.snap
+
+# Documentation (not needed in container)
+README.md
+DEPLOYMENT*.md
+docs/
+*.md
+
+# Scripts (not needed in container)
+scripts/
+Makefile
+
+# Docker files (avoid recursive copying)
+Dockerfile*
+docker-compose*
+.dockerignore
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Cache directories
+.cache/
+.parcel-cache/
+.npm/
+.yarn/
+
+# Temporary files
+tmp/
+temp/
+.tmp/
+
+# Production environment (will be set by Coolify)
+.env.production
+
+# Database files
+*.sqlite
+*.db
+
+# Build tools
+.turbo/
+.swc/
