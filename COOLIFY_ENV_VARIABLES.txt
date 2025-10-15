@@ -1,0 +1,54 @@
+# ENVIRONMENT VARIABLES FOR COOLIFY
+# Copy dan paste setiap variable ke Coolify Dashboard > Environment Variables
+
+# =============================================================================
+# CRITICAL VARIABLES (WAJIB) - COPY SATU PER SATU KE COOLIFY
+# =============================================================================
+
+NEXTAUTH_URL=https://bagizi.id
+
+NEXTAUTH_SECRET=GENERATE_SECRET_32_KARAKTER_ATAU_LEBIH
+
+DATABASE_URL=postgresql://username:password@host:5432/database_name
+
+NODE_ENV=production
+
+# =============================================================================
+# OPTIONAL VARIABLES (APLIKASI PUNYA FALLBACK)
+# =============================================================================
+
+REDIS_URL=redis://host:6379
+
+# =============================================================================
+# CARA GENERATE NEXTAUTH_SECRET
+# =============================================================================
+# Jalankan di terminal:
+# openssl rand -base64 32
+# 
+# Atau gunakan online generator:
+# https://generate-secret.vercel.app/32
+#
+# Contoh hasil:
+# NEXTAUTH_SECRET=abc123def456ghi789jkl012mno345pqr678stu901vwx234yz
+
+# =============================================================================
+# DATABASE_URL FORMAT
+# =============================================================================
+# 
+# Jika menggunakan Coolify PostgreSQL service:
+# DATABASE_URL=postgresql://bergizi_user:password@postgres:5432/bergizi_db
+#
+# Jika menggunakan external database:
+# DATABASE_URL=postgresql://user:pass@external-host:5432/database
+# 
+# Ganti dengan kredensial database Anda yang sebenarnya
+
+# =============================================================================
+# REDIS_URL (OPTIONAL)
+# =============================================================================
+#
+# Jika menggunakan Coolify Redis service:
+# REDIS_URL=redis://redis:6379
+#
+# Jika tidak ada Redis, aplikasi akan menggunakan fallback mode
+# (tidak akan error, fitur real-time akan menggunakan alternatif)
