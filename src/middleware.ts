@@ -62,7 +62,8 @@ function isSppgRoute(pathname: string): boolean {
   return sppgRoutes.some(route => pathname.startsWith(route))
 }
 
-function isPlatformAdmin(userRole: string): boolean {
+function isPlatformAdmin(userRole?: string): boolean {
+  if (!userRole) return false
   return [
     'PLATFORM_SUPERADMIN',
     'PLATFORM_SUPPORT', 
@@ -70,13 +71,24 @@ function isPlatformAdmin(userRole: string): boolean {
   ].includes(userRole)
 }
 
-function isSppgUser(userRole: string): boolean {
-  return userRole?.startsWith('SPPG_') || userRole === 'DEMO_USER'
+function isSppgUser(userRole?: string): boolean {
+  if (!userRole) return false
+  return userRole.startsWith('SPPG_') || userRole === 'DEMO_USER'
 }
 
 export default auth((req) => {
   const { pathname } = req.nextUrl
   const session = req.auth
+
+  // Debug logging for production issues (can be removed later)
+  if (process.env.NODE_ENV === 'production' && session) {
+    console.log('Middleware session debug:', {
+      hasUser: !!session.user,
+      userRole: session.user?.userRole,
+      sppgId: session.user?.sppgId,
+      pathname
+    })
+  }
 
   // Allow public routes
   if (isPublicRoute(pathname)) {
@@ -85,7 +97,7 @@ export default auth((req) => {
 
   // Handle authentication routes
   if (isAuthRoute(pathname)) {
-    if (session) {
+    if (session?.user?.userRole) {
       // Redirect authenticated users based on role
       const redirectUrl = isPlatformAdmin(session.user.userRole) 
         ? '/admin' 
@@ -96,7 +108,7 @@ export default auth((req) => {
   }
 
   // Require authentication for protected routes
-  if (!session) {
+  if (!session?.user) {
     const loginUrl = new URL('/login', req.url)
     loginUrl.searchParams.set('callbackUrl', pathname)
     return NextResponse.redirect(loginUrl)
@@ -104,7 +116,7 @@ export default auth((req) => {
 
   // Check admin route access
   if (isAdminRoute(pathname)) {
-    if (!isPlatformAdmin(session.user.userRole)) {
+    if (!session.user.userRole || !isPlatformAdmin(session.user.userRole)) {
       return NextResponse.redirect(new URL('/dashboard', req.url))
     }
     return NextResponse.next()
@@ -118,7 +130,7 @@ export default auth((req) => {
     }
 
     // Must be SPPG user
-    if (!isSppgUser(session.user.userRole)) {
+    if (!session.user.userRole || !isSppgUser(session.user.userRole)) {
       return NextResponse.redirect(new URL('/admin', req.url))
     }
 
