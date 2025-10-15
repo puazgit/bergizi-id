@@ -31,6 +31,8 @@
     "perf:test": "tsx scripts/test-performance.ts",
     "perf:benchmark": "tsx scripts/benchmark-performance.ts",
     "cache:clear": "tsx scripts/clear-cache.ts",
+    "deploy:validate": "./scripts/validate-deployment.sh",
+    "deploy:check": "npm run deploy:validate && npm run build",
     "prepare": "husky install"
   },
   "dependencies": {
